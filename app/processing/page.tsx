@@ -26,7 +26,7 @@ export default function ProcessingPage() {
 
         // ★ここでAPIにリクエストを送ります（非同期）
         // 127.0.0.1 (localhost) を使用
-        const response = await fetch('http://127.0.0.1:8000/api/segment', {
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/segment`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ image_base64: imageToSegment }),

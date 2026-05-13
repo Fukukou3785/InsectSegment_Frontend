@@ -200,7 +200,7 @@ export default function EditorPage() {
       const formData = new FormData()
       formData.append("current_mask", currentMaskBase64)
 
-      const response = await fetch("http://localhost:8000/api/recalc_lines", {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/recalc_lines`, {
         method: "POST",
         body: formData,
       })
@@ -428,7 +428,7 @@ export default function EditorPage() {
         formData.append('label_part', selectedPart)
         formData.append('current_mask', currentMaskBase64) 
 
-        const response = await fetch('http://localhost:8000/api/refine', {
+       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/refine`, {
             method: 'POST',
             body: formData,
         })
@@ -571,7 +571,7 @@ export default function EditorPage() {
       const tBottom = sessionStorage.getItem("thoraxBottom")
       if (originalData && aiMaskData) {
         try {
-          await fetch('http://localhost:8000/api/save_log', {
+          await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/save_log`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
