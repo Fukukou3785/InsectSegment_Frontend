@@ -32,14 +32,14 @@ export default function ProcessingPage() {
         }
         // ★追加ここまで
 
-        // 変更：APIにリクエストを送る際に session_id を追加
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/segment`, {
+        // === ✨修正後（ここから下をコピペして上書きしてください） ===
+        const formData = new FormData();
+         formData.append("image_base64", imageToSegment);
+         formData.append("session_id", sessionId || "unknown");
+
+         const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/segment`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            image_base64: imageToSegment,
-            session_id: sessionId // ← 追加！
-          }),
+          body: formData, // JSONではなく、FormDataの箱をそのまま送る
         });
         if (!response.ok) {
           throw new Error('AIしょりにしっぱいしました');
