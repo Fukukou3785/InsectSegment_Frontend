@@ -24,14 +24,23 @@ export default function ProcessingPage() {
         // 画像データの準備（data:image/png;base64, の部分を取り除く）
         const imageToSegment = image.replace(/^data:image\/\w+;base64,/, "")
 
-        // ★ここでAPIにリクエストを送ります（非同期）
-        // 127.0.0.1 (localhost) を使用
+        // ★追加ここから：名札（UUID）を作成して保存する
+        let sessionId = sessionStorage.getItem("sessionId");
+        if (!sessionId) {
+          sessionId = crypto.randomUUID(); // ランダムなIDを生成
+          sessionStorage.setItem("sessionId", sessionId);
+        }
+        // ★追加ここまで
+
+        // 変更：APIにリクエストを送る際に session_id を追加
         const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/segment`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_base64: imageToSegment }),
+          body: JSON.stringify({ 
+            image_base64: imageToSegment,
+            session_id: sessionId // ← 追加！
+          }),
         });
-
         if (!response.ok) {
           throw new Error('AIしょりにしっぱいしました');
         }

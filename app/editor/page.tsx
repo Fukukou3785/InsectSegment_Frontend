@@ -197,8 +197,11 @@ export default function EditorPage() {
 
     try {
       const currentMaskBase64 = maskCanvas.toDataURL("image/png")
+      const sessionId = sessionStorage.getItem("sessionId") // ← 追加
+
       const formData = new FormData()
       formData.append("current_mask", currentMaskBase64)
+      if (sessionId) formData.append("session_id", sessionId) // ← 追加
 
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/recalc_lines`, {
         method: "POST",
@@ -421,12 +424,14 @@ export default function EditorPage() {
         
         // 現在のマスク画像をサーバーに送る
         const currentMaskBase64 = maskCanvas.toDataURL("image/png")
+        const sessionId = sessionStorage.getItem("sessionId") // ← 追加
 
         const formData = new FormData()
         formData.append('x', Math.round(pos.x).toString())
         formData.append('y', Math.round(pos.y).toString())
         formData.append('label_part', selectedPart)
         formData.append('current_mask', currentMaskBase64) 
+        if (sessionId) formData.append('session_id', sessionId) // ← 追加
 
        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/refine`, {
             method: 'POST',
@@ -579,7 +584,8 @@ export default function EditorPage() {
               ai_mask_base64: aiMaskData,
               user_mask_base64: userMaskData,
               thorax_top: Number(tTop) || 0,
-              thorax_bottom: Number(tBottom) || 0
+              thorax_bottom: Number(tBottom) || 0,
+              session_id: sessionStorage.getItem("sessionId") || "unknown" // ← 追加
             }),
           })
           alert("データを保存しました！ご協力ありがとうございます。")
