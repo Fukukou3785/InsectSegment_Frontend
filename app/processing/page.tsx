@@ -21,26 +21,27 @@ export default function ProcessingPage() {
     // --- AI処理の実行関数 ---
     const runAIProcess = async () => {
       try {
-        // 画像データの準備（data:image/png;base64, の部分を取り除く）
-        const imageToSegment = image.replace(/^data:image\/\w+;base64,/, "")
+        // ★修正: バックエンド側でカンマを基準に分割しているため、
+        // 「data:image/png;base64,」の部分を消さずにそのまま送ります！
+        // const imageToSegment = image.replace(/^data:image\/\w+;base64,/, "")
 
-        // ★追加ここから：名札（UUID）を作成して保存する
+        // ★名札（UUID）を作成して保存する
         let sessionId = sessionStorage.getItem("sessionId");
         if (!sessionId) {
           sessionId = crypto.randomUUID(); // ランダムなIDを生成
           sessionStorage.setItem("sessionId", sessionId);
         }
-        // ★追加ここまで
 
-        // === ✨修正後（ここから下をコピペして上書きしてください） ===
         const formData = new FormData();
-         formData.append("image_base64", imageToSegment);
-         formData.append("session_id", sessionId || "unknown");
+        // ★修正：imageToSegment ではなく、そのままの image を送る！
+        formData.append("image_base64", image); 
+        formData.append("session_id", sessionId || "unknown");
 
-         const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/segment`, {
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/segment`, {
           method: 'POST',
           body: formData, // JSONではなく、FormDataの箱をそのまま送る
         });
+        
         if (!response.ok) {
           throw new Error('AIしょりにしっぱいしました');
         }
