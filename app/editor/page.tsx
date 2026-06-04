@@ -576,6 +576,7 @@ export default function EditorPage() {
       const tBottom = sessionStorage.getItem("thoraxBottom")
       if (originalData && aiMaskData) {
         try {
+          // ★確認ポイント: session_id が確実に送られているか
           await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/save_log`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -585,7 +586,7 @@ export default function EditorPage() {
               user_mask_base64: userMaskData,
               thorax_top: Number(tTop) || 0,
               thorax_bottom: Number(tBottom) || 0,
-              session_id: sessionStorage.getItem("sessionId") || "unknown" // ← 追加
+              session_id: sessionStorage.getItem("sessionId") || "unknown" // ← ここ！
             }),
           })
           alert("データを保存しました！ご協力ありがとうございます。")
