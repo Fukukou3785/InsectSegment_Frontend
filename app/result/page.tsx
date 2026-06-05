@@ -22,28 +22,28 @@ const bodyParts: BodyPart[] = [
     color: "#3b82f6", // Blue
     description: "めやくち、しょっかくがあるよ",
     funFact: "こんちゅうのめは、たくさんのちいさなめがあつまってできているんだ！これを「ふくがん」っていうよ。",
-    targetRGB: [31, 119, 180], 
+    targetRGB: [31, 119, 180],
   },
   {
     name: "むね",
     color: "#22c55e", // Green
     description: "あしやはねがついているよ",
     funFact: "こんちゅうのあしは、ぜんぶで6ほん！ぜんぶむねからはえているんだよ。はねもむねについているよ。",
-    targetRGB: [44, 160, 44], 
+    targetRGB: [44, 160, 44],
   },
   {
     name: "おなか",
     color: "#ef4444", // Red
     description: "しょくもつをしょうかするよ",
     funFact: "おなかには、たべたものをしょうかするきかんや、たまごをつくるきかんがあるよ。",
-    targetRGB: [214, 39, 40], 
+    targetRGB: [214, 39, 40],
   },
   {
     name: "あし",
     color: "#a855f7", // Purple
     description: "むねからはえているよ",
     funFact: "こんちゅうのあしは、まえあし・なかあし・うしろあしの3つのペアにわかれているよ。",
-    targetRGB: [148, 103, 189], 
+    targetRGB: [148, 103, 189],
   },
 ]
 
@@ -64,14 +64,14 @@ export default function ResultPage() {
   const [drawnLines, setDrawnLines] = useState<number[]>([])
   const [quizResult, setQuizResult] = useState<string | null>(null)
   const [showHint, setShowHint] = useState(false) // ★追加: ヒント表示フラグ
-  
+
   const [thoraxTop, setThoraxTop] = useState<number | null>(null)
   const [thoraxBottom, setThoraxBottom] = useState<number | null>(null)
-  
+
   useEffect(() => {
     const imageData = sessionStorage.getItem("insectImage")
     const maskData = sessionStorage.getItem("editedMask")
-    
+
     const storedTop = sessionStorage.getItem("thoraxTop")
     const storedBottom = sessionStorage.getItem("thoraxBottom")
 
@@ -93,7 +93,7 @@ export default function ResultPage() {
     img.onload = () => {
       canvas.width = img.width
       canvas.height = img.height
-      
+
       ctx.drawImage(img, 0, 0)
       // --- 変更ここから ---
       // 保存されているのは「比率(0.35など)」なので、キャンバスの高さを掛けて「座標」に戻す
@@ -107,119 +107,119 @@ export default function ResultPage() {
       if (maskData) {
         const maskImg = new Image()
         maskImg.onload = () => {
-          
-// ★修正開始: クイズ中以外はモードによって塗り方を変える
+
+          // ★修正開始: クイズ中以外はモードによって塗り方を変える
           if (!quizMode || showHint) {
-              ctx.save()
-              
-              const tempCanvas = document.createElement("canvas")
-              tempCanvas.width = canvas.width
-              tempCanvas.height = canvas.height
-              const tempCtx = tempCanvas.getContext("2d")
-              
-              if (tempCtx) {
-                tempCtx.drawImage(maskImg, 0, 0, canvas.width, canvas.height)
-                const imgData = tempCtx.getImageData(0, 0, canvas.width, canvas.height)
-                const data = imgData.data
-                const width = canvas.width;
+            ctx.save()
 
-                // 色の定義
-                const COLOR_HEAD = [31, 119, 180]    // 青
-                const COLOR_THORAX = [44, 160, 44]  // 緑
-                const COLOR_ABDOMEN = [214, 39, 40] // 赤
-                const COLOR_LEG = [148, 103, 189]   // 紫
+            const tempCanvas = document.createElement("canvas")
+            tempCanvas.width = canvas.width
+            tempCanvas.height = canvas.height
+            const tempCtx = tempCanvas.getContext("2d")
 
-                for (let i = 0; i < data.length; i += 4) {
-                    const r = data[i]
-                    const g = data[i + 1]
-                    const b = data[i + 2]
-                    const a = data[i + 3]
+            if (tempCtx) {
+              tempCtx.drawImage(maskImg, 0, 0, canvas.width, canvas.height)
+              const imgData = tempCtx.getImageData(0, 0, canvas.width, canvas.height)
+              const data = imgData.data
+              const width = canvas.width;
 
-                    if (a === 0) continue 
+              // 色の定義
+              const COLOR_HEAD = [31, 119, 180]    // 青
+              const COLOR_THORAX = [44, 160, 44]  // 緑
+              const COLOR_ABDOMEN = [214, 39, 40] // 赤
+              const COLOR_LEG = [148, 103, 189]   // 紫
 
-                    const pixelIndex = i / 4;
-                    const y = Math.floor(pixelIndex / width);
+              for (let i = 0; i < data.length; i += 4) {
+                const r = data[i]
+                const g = data[i + 1]
+                const b = data[i + 2]
+                const a = data[i + 3]
 
-                    // 足判定: 現在の色が紫に近いかどうか
-                    const distLeg = Math.abs(r - COLOR_LEG[0]) + Math.abs(g - COLOR_LEG[1]) + Math.abs(b - COLOR_LEG[2])
-                    const isLeg = distLeg < 80; 
+                if (a === 0) continue
 
-                    // ▼▼▼ ロジック変更部分 ▼▼▼
-                    if (viewMode === "structure" && !quizMode) {
-// 【体のつくりモード】
-                        
-                        // 1. まず色を決める（強制的に正しい色にするロジックは維持）
-                        if (isLeg) {
-                            data[i] = COLOR_LEG[0]; data[i+1] = COLOR_LEG[1]; data[i+2] = COLOR_LEG[2];
-                        } else {
-                            if (y < currentThoraxTop) {
-                                data[i] = COLOR_HEAD[0]; data[i+1] = COLOR_HEAD[1]; data[i+2] = COLOR_HEAD[2];
-                            } else if (y < currentThoraxBottom) {
-                                data[i] = COLOR_THORAX[0]; data[i+1] = COLOR_THORAX[1]; data[i+2] = COLOR_THORAX[2];
-                            } else {
-                                data[i] = COLOR_ABDOMEN[0]; data[i+1] = COLOR_ABDOMEN[1]; data[i+2] = COLOR_ABDOMEN[2];
-                            }
-                        }
+                const pixelIndex = i / 4;
+                const y = Math.floor(pixelIndex / width);
 
-                        // 2. 次に濃さ（ハイライト）を決める ★ここを追加・修正
-                        let alpha = isLeg ? 200 : 180; // 通常時の濃さ
+                // 足判定: 現在の色が紫に近いかどうか
+                const distLeg = Math.abs(r - COLOR_LEG[0]) + Math.abs(g - COLOR_LEG[1]) + Math.abs(b - COLOR_LEG[2])
+                const isLeg = distLeg < 80;
 
-                        if (selectedPart !== null) {
-                             // 部位が選択されている場合、その部位かどうか判定
-                             let isTarget = false;
-                             
-                             if (selectedPart === 0) { // あたま
-                                 if (y < currentThoraxTop && !isLeg) isTarget = true;
-                             } else if (selectedPart === 1) { // むね
-                                 if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) isTarget = true;
-                             } else if (selectedPart === 2) { // おなか
-                                 if (y >= currentThoraxBottom && !isLeg) isTarget = true;
-                             } else if (selectedPart === 3) { // あし
-                                 if (isLeg) isTarget = true;
-                             }
-                             
-                             // ターゲットなら濃く(220)、それ以外はかなり薄く(40)する
-                             alpha = isTarget ? 220 : 40; 
-                        }
-                        
-                        data[i + 3] = alpha;
+                // ▼▼▼ ロジック変更部分 ▼▼▼
+                if (viewMode === "structure" && !quizMode) {
+                  // 【体のつくりモード】
 
+                  // 1. まず色を決める（強制的に正しい色にするロジックは維持）
+                  if (isLeg) {
+                    data[i] = COLOR_LEG[0]; data[i + 1] = COLOR_LEG[1]; data[i + 2] = COLOR_LEG[2];
+                  } else {
+                    if (y < currentThoraxTop) {
+                      data[i] = COLOR_HEAD[0]; data[i + 1] = COLOR_HEAD[1]; data[i + 2] = COLOR_HEAD[2];
+                    } else if (y < currentThoraxBottom) {
+                      data[i] = COLOR_THORAX[0]; data[i + 1] = COLOR_THORAX[1]; data[i + 2] = COLOR_THORAX[2];
                     } else {
-                        // 【ぬったいろモード】 または 【クイズ中】
-                        // ユーザーが塗った色をそのまま表示する
-                        let alpha = 150;
-                        
-                        // ハイライト処理 (選択した部位だけ濃くする既存ロジック)
-                        // ★修正: 「&& viewMode !== "painted"」を追加してください
-                        // これにより、ぬったいろモードではハイライトが無効になります
-                        if (selectedPart !== null && viewMode !== "painted") {
-                            let shouldHighlight = false;
-                            if (selectedPart === 0) { 
-                                if (y < currentThoraxTop && !isLeg) shouldHighlight = true;
-                            } 
-                            else if (selectedPart === 1) { 
-                                if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) shouldHighlight = true;
-                            } 
-                            else if (selectedPart === 2) { 
-                                if (y >= currentThoraxBottom && !isLeg) shouldHighlight = true;
-                            } 
-                            else if (selectedPart === 3) { 
-                                if (isLeg) shouldHighlight = true;
-                            }
-                            alpha = shouldHighlight ? 220 : 40;
-                        }
-                        
-                        if (quizMode && showHint) alpha = 80; // ヒント時は薄く
-
-                        data[i + 3] = alpha;
+                      data[i] = COLOR_ABDOMEN[0]; data[i + 1] = COLOR_ABDOMEN[1]; data[i + 2] = COLOR_ABDOMEN[2];
                     }
-                    // ▲▲▲ ロジック変更終了 ▲▲▲
+                  }
+
+                  // 2. 次に濃さ（ハイライト）を決める ★ここを追加・修正
+                  let alpha = isLeg ? 200 : 180; // 通常時の濃さ
+
+                  if (selectedPart !== null) {
+                    // 部位が選択されている場合、その部位かどうか判定
+                    let isTarget = false;
+
+                    if (selectedPart === 0) { // あたま
+                      if (y < currentThoraxTop && !isLeg) isTarget = true;
+                    } else if (selectedPart === 1) { // むね
+                      if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) isTarget = true;
+                    } else if (selectedPart === 2) { // おなか
+                      if (y >= currentThoraxBottom && !isLeg) isTarget = true;
+                    } else if (selectedPart === 3) { // あし
+                      if (isLeg) isTarget = true;
+                    }
+
+                    // ターゲットなら濃く(220)、それ以外はかなり薄く(40)する
+                    alpha = isTarget ? 220 : 40;
+                  }
+
+                  data[i + 3] = alpha;
+
+                } else {
+                  // 【ぬったいろモード】 または 【クイズ中】
+                  // ユーザーが塗った色をそのまま表示する
+                  let alpha = 150;
+
+                  // ハイライト処理 (選択した部位だけ濃くする既存ロジック)
+                  // ★修正: 「&& viewMode !== "painted"」を追加してください
+                  // これにより、ぬったいろモードではハイライトが無効になります
+                  if (selectedPart !== null && viewMode !== "painted") {
+                    let shouldHighlight = false;
+                    if (selectedPart === 0) {
+                      if (y < currentThoraxTop && !isLeg) shouldHighlight = true;
+                    }
+                    else if (selectedPart === 1) {
+                      if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) shouldHighlight = true;
+                    }
+                    else if (selectedPart === 2) {
+                      if (y >= currentThoraxBottom && !isLeg) shouldHighlight = true;
+                    }
+                    else if (selectedPart === 3) {
+                      if (isLeg) shouldHighlight = true;
+                    }
+                    alpha = shouldHighlight ? 220 : 40;
+                  }
+
+                  if (quizMode && showHint) alpha = 80; // ヒント時は薄く
+
+                  data[i + 3] = alpha;
                 }
-                
-                tempCtx.putImageData(imgData, 0, 0);
-                ctx.drawImage(tempCanvas, 0, 0); 
+                // ▲▲▲ ロジック変更終了 ▲▲▲
               }
-              ctx.restore()
+
+              tempCtx.putImageData(imgData, 0, 0);
+              ctx.drawImage(tempCanvas, 0, 0);
+            }
+            ctx.restore()
           }
 
           // 線を引くのは「structure」モードの時だけ
@@ -232,9 +232,9 @@ export default function ResultPage() {
         maskImg.src = maskData
       } else {
         if (quizMode) {
-            drawQuizLines(ctx, canvas.width)
+          drawQuizLines(ctx, canvas.width)
         } else {
-            drawDividingLines(ctx, canvas.width, canvas.height, currentThoraxTop, currentThoraxBottom)
+          drawDividingLines(ctx, canvas.width, canvas.height, currentThoraxTop, currentThoraxBottom)
         }
       }
     }
@@ -242,10 +242,10 @@ export default function ResultPage() {
   }, [router, quizMode, drawnLines, selectedPart, showHint, viewMode]) // showHint依存を追加
 
 
-  
+
   const drawQuizLines = (ctx: CanvasRenderingContext2D, width: number) => {
     drawnLines.forEach((y) => {
-      ctx.strokeStyle = "#f59e0b" 
+      ctx.strokeStyle = "#f59e0b"
       ctx.lineWidth = 6
       ctx.setLineDash([15, 15])
       ctx.lineCap = "round"
@@ -261,7 +261,7 @@ export default function ResultPage() {
     const headEnd = tTop
     const thoraxEnd = tBottom
 
-    const lineColor = "#fbbf24" 
+    const lineColor = "#fbbf24"
     const lineShadow = "rgba(0,0,0,0.2)"
 
     ctx.save()
@@ -283,14 +283,14 @@ export default function ResultPage() {
     ctx.moveTo(10, thoraxEnd)
     ctx.lineTo(width - 10, thoraxEnd)
     ctx.stroke()
-    
+
     ctx.setLineDash([])
     ctx.fillStyle = lineColor
     const dotSize = 6
-    ;[headEnd, thoraxEnd].forEach(y => {
-        ctx.beginPath(); ctx.arc(15, y, dotSize, 0, Math.PI*2); ctx.fill()
-        ctx.beginPath(); ctx.arc(width-15, y, dotSize, 0, Math.PI*2); ctx.fill()
-    })
+      ;[headEnd, thoraxEnd].forEach(y => {
+        ctx.beginPath(); ctx.arc(15, y, dotSize, 0, Math.PI * 2); ctx.fill()
+        ctx.beginPath(); ctx.arc(width - 15, y, dotSize, 0, Math.PI * 2); ctx.fill()
+      })
     ctx.restore()
 
     drawRangeLabel(ctx, "あたま", bodyParts[0].color, 0, headEnd, width)
@@ -299,58 +299,58 @@ export default function ResultPage() {
   }
 
   const drawRangeLabel = (ctx: CanvasRenderingContext2D, text: string, color: string, startY: number, endY: number, width: number) => {
-      const centerY = (startY + endY) / 2
-      const barX = width - 10
-      
-      if (endY - startY < 20) return
+    const centerY = (startY + endY) / 2
+    const barX = width - 10
 
-      ctx.save()
-      ctx.strokeStyle = color
-      ctx.lineWidth = 6
-      ctx.lineCap = "round"
-      ctx.beginPath()
-      ctx.moveTo(barX, startY + 5)
-      ctx.lineTo(barX, endY - 5)
-      ctx.stroke()
+    if (endY - startY < 20) return
 
-      ctx.beginPath()
-      ctx.moveTo(barX - 5, startY + 5); ctx.lineTo(barX, startY + 5)
-      ctx.moveTo(barX - 5, endY - 5);   ctx.lineTo(barX, endY - 5)
-      ctx.stroke()
+    ctx.save()
+    ctx.strokeStyle = color
+    ctx.lineWidth = 6
+    ctx.lineCap = "round"
+    ctx.beginPath()
+    ctx.moveTo(barX, startY + 5)
+    ctx.lineTo(barX, endY - 5)
+    ctx.stroke()
 
-      ctx.font = "bold 20px 'M PLUS Rounded 1c', sans-serif" 
-      
-      const metrics = ctx.measureText(text)
-      const paddingX = 16
-      const bgWidth = metrics.width + paddingX * 2
-      const bgHeight = 36
-      
-      const bgX = barX - 15 - bgWidth
-      const bgY = centerY - bgHeight / 2
+    ctx.beginPath()
+    ctx.moveTo(barX - 5, startY + 5); ctx.lineTo(barX, startY + 5)
+    ctx.moveTo(barX - 5, endY - 5); ctx.lineTo(barX, endY - 5)
+    ctx.stroke()
 
-      let safeBgY = bgY
-      if (safeBgY < startY) safeBgY = startY
-      if (safeBgY + bgHeight > endY) safeBgY = endY - bgHeight
-      if (safeBgY < 0) safeBgY = 0
+    ctx.font = "bold 20px 'M PLUS Rounded 1c', sans-serif"
 
-      ctx.shadowColor = "rgba(0,0,0,0.2)"
-      ctx.shadowBlur = 4
-      ctx.fillStyle = "white"
-      
-      roundRect(ctx, bgX, safeBgY, bgWidth, bgHeight, bgHeight / 2)
-      ctx.fill()
-      
-      ctx.lineWidth = 2
-      ctx.strokeStyle = color
-      ctx.stroke()
+    const metrics = ctx.measureText(text)
+    const paddingX = 16
+    const bgWidth = metrics.width + paddingX * 2
+    const bgHeight = 36
 
-      ctx.shadowBlur = 0
-      ctx.fillStyle = color
-      ctx.textAlign = "center"
-      ctx.textBaseline = "middle" 
-      ctx.fillText(text, bgX + bgWidth/2, safeBgY + bgHeight/2 + 1)
+    const bgX = barX - 15 - bgWidth
+    const bgY = centerY - bgHeight / 2
 
-      ctx.restore()
+    let safeBgY = bgY
+    if (safeBgY < startY) safeBgY = startY
+    if (safeBgY + bgHeight > endY) safeBgY = endY - bgHeight
+    if (safeBgY < 0) safeBgY = 0
+
+    ctx.shadowColor = "rgba(0,0,0,0.2)"
+    ctx.shadowBlur = 4
+    ctx.fillStyle = "white"
+
+    roundRect(ctx, bgX, safeBgY, bgWidth, bgHeight, bgHeight / 2)
+    ctx.fill()
+
+    ctx.lineWidth = 2
+    ctx.strokeStyle = color
+    ctx.stroke()
+
+    ctx.shadowBlur = 0
+    ctx.fillStyle = color
+    ctx.textAlign = "center"
+    ctx.textBaseline = "middle"
+    ctx.fillText(text, bgX + bgWidth / 2, safeBgY + bgHeight / 2 + 1)
+
+    ctx.restore()
   }
 
   const roundRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
@@ -366,16 +366,59 @@ export default function ResultPage() {
   }
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!quizMode || drawnLines.length >= 2) return
-
     const canvas = canvasRef.current
     if (!canvas) return
 
     const rect = canvas.getBoundingClientRect()
     const scaleY = canvas.height / rect.height
+    const scaleX = canvas.width / rect.width
+
+    // キャンバス上のクリック座標を取得
+    const x = (e.clientX - rect.left) * scaleX
     const y = (e.clientY - rect.top) * scaleY
 
-    setDrawnLines([...drawnLines, y])
+    // 🎯 【クイズモードの時】は今まで通り線を引く処理
+    if (quizMode) {
+      if (drawnLines.length >= 2) return
+      setDrawnLines([...drawnLines, y])
+      return
+    }
+
+    // 🎯 【からだのつくりモードの時】はクリックした部位を選択する処理
+    if (viewMode === "structure") {
+      const ctx = canvas.getContext("2d")
+      if (!ctx) return
+
+      // クリックした1ピクセルの色データを取得
+      const pixel = ctx.getImageData(x, y, 1, 1).data
+      // 透明な部分（背景）をクリックした場合は選択を解除
+      if (pixel[3] === 0) {
+        setSelectedPart(null)
+        return
+      }
+
+      // 色から部位を判定する関数
+      const isColorMatch = (color: [number, number, number], targetRGB: [number, number, number]) => {
+        // ピクセルの色と目標の色の差（距離）を計算して、近い色か判定
+        const dist = Math.abs(color[0] - targetRGB[0]) + Math.abs(color[1] - targetRGB[1]) + Math.abs(color[2] - targetRGB[2])
+        return dist < 80 // 許容範囲
+      }
+
+      const clickedColor: [number, number, number] = [pixel[0], pixel[1], pixel[2]]
+
+      // どの部位の色に近いかチェックして選択
+      if (isColorMatch(clickedColor, bodyParts[3].targetRGB)) {
+        setSelectedPart(3) // あし
+      } else if (isColorMatch(clickedColor, bodyParts[0].targetRGB)) {
+        setSelectedPart(0) // あたま
+      } else if (isColorMatch(clickedColor, bodyParts[1].targetRGB)) {
+        setSelectedPart(1) // むね
+      } else if (isColorMatch(clickedColor, bodyParts[2].targetRGB)) {
+        setSelectedPart(2) // おなか
+      } else {
+        setSelectedPart(null)
+      }
+    }
   }
 
   const checkQuizAnswer = () => {
@@ -394,7 +437,7 @@ export default function ResultPage() {
     // ★修正: 正解判定ロジック
     const correctTop = thoraxTop ?? canvas.height * 0.35
     const correctBottom = thoraxBottom ?? canvas.height * 0.65
-    
+
     // 許容誤差 (画像の高さの5%くらい)
     const tolerance = canvas.height * 0.05
 
@@ -456,7 +499,7 @@ export default function ResultPage() {
       <main className="flex-1 min-h-0 p-2 md:p-3 overflow-hidden">
         <div className="max-w-7xl mx-auto h-full flex flex-col lg:flex-row gap-2 md:gap-3">
           <Card className="p-2 md:p-3 bg-white shadow-lg flex-1 min-h-0 flex flex-col items-center justify-center overflow-hidden relative">
-            
+
             {/* ★修正: ポジションを absolute から変更し、mb-2 で下に隙間を作る */}
             {/* これにより、画像の上にボタンが被らず、画像の上のスペースに配置されます */}
             {!quizMode && (
@@ -464,23 +507,21 @@ export default function ResultPage() {
                 <div className="bg-white/90 backdrop-blur-sm p-1 rounded-full shadow-md border border-gray-200 flex gap-1 pointer-events-auto">
                   <button
                     onClick={() => setViewMode("painted")}
-                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${
-                      viewMode === "painted" 
-                        ? "bg-blue-500 text-white shadow-sm" 
+                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${viewMode === "painted"
+                        ? "bg-blue-500 text-white shadow-sm"
                         : "text-gray-500 hover:bg-gray-100"
-                    }`}
+                      }`}
                   >
                     <span>🎨</span> ぬったいろ
                   </button>
                   <button
                     onClick={() => setViewMode("structure")}
-                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${
-                      viewMode === "structure" 
-                        ? "bg-green-500 text-white shadow-sm" 
+                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${viewMode === "structure"
+                        ? "bg-green-500 text-white shadow-sm"
                         : "text-gray-500 hover:bg-gray-100"
-                    }`}
+                      }`}
                   >
-                     <span>📏</span> からだのつくり
+                    <span>📏</span> からだのつくり
                   </button>
                 </div>
               </div>
@@ -494,7 +535,7 @@ export default function ResultPage() {
                 onClick={handleCanvasClick}
               />
             </div>
-            
+
             {/* クイズ用のメッセージ (ここは変更なし) */}
             {quizMode && drawnLines.length < 2 && (
               <div className="mt-2 p-2 bg-blue-100 rounded-lg text-center flex-shrink-0">
@@ -518,41 +559,40 @@ export default function ResultPage() {
 
                 {quizResult && (
                   <Card
-                    className={`p-2 md:p-3 flex-shrink-0 ${
-                      quizResult.includes("せいかい")
+                    className={`p-2 md:p-3 flex-shrink-0 ${quizResult.includes("せいかい")
                         ? "bg-green-100 border-2 border-green-500"
                         : quizResult.includes("おしい")
                           ? "bg-yellow-100 border-2 border-yellow-500"
                           : "bg-red-100 border-2 border-red-500"
-                    }`}
+                      }`}
                   >
                     <p className="text-sm md:text-base font-bold text-center mb-2">{quizResult}</p>
                     <div className="flex flex-col gap-2">
-                        <div className="flex gap-2">
-                            <Button size="sm" className="flex-1 h-10 text-xs md:text-sm font-bold" onClick={resetQuiz}>
-                                もういちど
-                            </Button>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                className="flex-1 h-10 text-xs md:text-sm font-bold bg-white"
-                                onClick={endQuiz}
-                            >
-                                おわる
-                            </Button>
-                        </div>
-                        {/* ★追加: 正解でない場合にヒントボタンを表示 */}
-                        {!quizResult.includes("せいかい") && (
-                            <Button 
-                                size="sm" 
-                                className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-bold"
-                                onClick={() => setShowHint(true)}
-                                disabled={showHint}
-                            >
-                                <Lightbulb className="w-4 h-4 mr-2" />
-                                ヒントをみる
-                            </Button>
-                        )}
+                      <div className="flex gap-2">
+                        <Button size="sm" className="flex-1 h-10 text-xs md:text-sm font-bold" onClick={resetQuiz}>
+                          もういちど
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="flex-1 h-10 text-xs md:text-sm font-bold bg-white"
+                          onClick={endQuiz}
+                        >
+                          おわる
+                        </Button>
+                      </div>
+                      {/* ★追加: 正解でない場合にヒントボタンを表示 */}
+                      {!quizResult.includes("せいかい") && (
+                        <Button
+                          size="sm"
+                          className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-bold"
+                          onClick={() => setShowHint(true)}
+                          disabled={showHint}
+                        >
+                          <Lightbulb className="w-4 h-4 mr-2" />
+                          ヒントをみる
+                        </Button>
+                      )}
                     </div>
                   </Card>
                 )}
@@ -590,9 +630,8 @@ export default function ResultPage() {
                       {bodyParts.map((part, index) => (
                         <Card
                           key={index}
-                          className={`p-2 cursor-pointer transition-all flex-shrink-0 ${
-                            selectedPart === index ? "ring-2 ring-yellow-400 shadow-lg" : "hover:shadow-md"
-                          }`}
+                          className={`p-2 cursor-pointer transition-all flex-shrink-0 ${selectedPart === index ? "ring-2 ring-yellow-400 shadow-lg" : "hover:shadow-md"
+                            }`}
                           onClick={() => setSelectedPart(selectedPart === index ? null : index)}
                         >
                           <div className="flex items-start gap-2">
@@ -617,19 +656,41 @@ export default function ResultPage() {
 
                     <Card className="p-2 md:p-3 bg-gradient-to-r from-blue-50 to-green-50 border-2 border-blue-300 flex-shrink-0">
                       <p className="text-xs leading-snug">
-                        <strong className="text-xs md:text-sm">こんちゅうのからだ：</strong>
+                        <strong className="text-xs md:text-sm text-gray-800">こんちゅうのからだ：</strong>
                         <br />
-                        こんちゅうのからだは、<strong>あたま・むね・はら</strong>の3つのぶぶんにわかれているよ！
-                        あしは6ほんあって、ぜんぶむねからはえているんだ。
+                        こんちゅうのからだは、
+                        <span
+                          className="font-bold text-blue-600 cursor-pointer hover:underline hover:bg-blue-100 px-1 rounded transition-colors"
+                          onClick={() => setSelectedPart(0)}
+                        >あたま</span>・
+                        <span
+                          className="font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
+                          onClick={() => setSelectedPart(1)}
+                        >むね</span>・
+                        <span
+                          className="font-bold text-red-600 cursor-pointer hover:underline hover:bg-red-100 px-1 rounded transition-colors"
+                          onClick={() => setSelectedPart(2)}
+                        >おなか</span>（はら）
+                        の3つのぶぶんにわかれています。
+                        <span
+                          className="font-bold text-purple-600 cursor-pointer hover:underline hover:bg-purple-100 px-1 rounded transition-colors"
+                          onClick={() => setSelectedPart(3)}
+                        >あし</span>
+                        は6ほんあって、すべて
+                        <span
+                          className="font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
+                          onClick={() => setSelectedPart(1)}
+                        >むね</span>
+                        からはえています。
                       </p>
                     </Card>
                   </>
                 ) : (
                   /* 「ぬったいろ」モード: 解説を隠してメッセージを表示 */
                   <div className="flex-1 flex flex-col items-center justify-center text-center p-4 opacity-60">
-                     <Sparkles className="w-12 h-12 text-yellow-400 mb-2" />
-                     <p className="font-bold text-gray-600">じょうずにぬれたね！</p>
-                     <p className="text-sm text-gray-500">きみがぬったいろをじっくりみてみよう</p>
+                    <Sparkles className="w-12 h-12 text-yellow-400 mb-2" />
+                    <p className="font-bold text-gray-600">じょうずにぬれたね！</p>
+                    <p className="text-sm text-gray-500">きみがぬったいろをじっくりみてみよう</p>
                   </div>
                 )}
 
