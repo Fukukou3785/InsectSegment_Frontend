@@ -322,13 +322,7 @@ export default function EditorPage() {
           ctx.drawImage(coloredMaskCanvas, 0, 0)
       }
 
-      // 6. ダウンロード実行
-      const link = document.createElement("a")
-      link.download = "demo_structure_mode.png" // ファイル名変更
-      link.href = tempCanvas.toDataURL("image/png")
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
+
 
     } catch (e) {
       console.error("Demo download failed:", e)
