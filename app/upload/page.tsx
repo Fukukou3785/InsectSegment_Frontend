@@ -366,18 +366,22 @@ export default function UploadPage(): ReactElement {
                   <ImageIcon className="w-5 h-5 inline-block mr-2 mb-1 text-primary" />
                   サンプルがぞうでためす
                 </p>
-                <div className="grid grid-cols-3 gap-3">
-                  {SAMPLE_IMAGES.map((src, index) => (
-                    <button
-                      key={index}
-                      onClick={() => handleSampleSelect(src)}
-                      className="aspect-square border-2 border-gray-200 rounded-lg overflow-hidden hover:border-primary transition-colors focus:outline-none focus:ring-2 focus:ring-primary shadow-sm"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={src} alt={`Sample ${index + 1}`} className="w-full h-full object-cover" />
-                    </button>
-                  ))}
-                </div>
+            <div className="grid grid-cols-3 gap-3">
+                 {SAMPLE_IMAGES.map((src, index) => (
+                  <button
+                    key={index}
+                    onClick={() => handleSampleSelect(src)}
+                    // ★修正1: bg-white と p-2 (余白) を追加して、画像を中央に配置
+                    className="aspect-square border-2 border-gray-200 rounded-lg overflow-hidden hover:border-primary transition-colors focus:outline-none focus:ring-2 focus:ring-primary shadow-sm bg-white p-2 flex items-center justify-center"
+                >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    {/* ★修正2: object-cover を object-contain に変更 */}
+                    <img src={src} alt={`Sample ${index + 1}`} className="w-full h-full object-contain" />
+                </button>
+              ))} 
+            </div>
+
+            
               </div>
             </div>
 
