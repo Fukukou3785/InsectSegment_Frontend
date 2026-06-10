@@ -32,10 +32,10 @@ const bodyParts: BodyPart[] = [
     targetRGB: [44, 160, 44],
   },
   {
-    name: "おなか",
+    name: "はら",
     color: "#ef4444", // Red
     description: "しょくもつをしょうかするよ",
-    funFact: "おなかには、たべたものをしょうかするきかんや、たまごをつくるきかんがあるよ。",
+    funFact: "はらには、たべたものをしょうかするきかんや、たまごをつくるきかんがあるよ。",
     targetRGB: [214, 39, 40],
   },
   {
@@ -172,7 +172,7 @@ export default function ResultPage() {
                       if (y < currentThoraxTop && !isLeg) isTarget = true;
                     } else if (selectedPart === 1) { // むね
                       if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) isTarget = true;
-                    } else if (selectedPart === 2) { // おなか
+                    } else if (selectedPart === 2) { // はら
                       if (y >= currentThoraxBottom && !isLeg) isTarget = true;
                     } else if (selectedPart === 3) { // あし
                       if (isLeg) isTarget = true;
@@ -295,7 +295,7 @@ export default function ResultPage() {
 
     drawRangeLabel(ctx, "あたま", bodyParts[0].color, 0, headEnd, width)
     drawRangeLabel(ctx, "むね", bodyParts[1].color, headEnd, thoraxEnd, width)
-    drawRangeLabel(ctx, "おなか", bodyParts[2].color, thoraxEnd, height, width)
+    drawRangeLabel(ctx, "はら", bodyParts[2].color, thoraxEnd, height, width)
   }
 
   const drawRangeLabel = (ctx: CanvasRenderingContext2D, text: string, color: string, startY: number, endY: number, width: number) => {
@@ -414,7 +414,7 @@ export default function ResultPage() {
       } else if (isColorMatch(clickedColor, bodyParts[1].targetRGB)) {
         setSelectedPart(1) // むね
       } else if (isColorMatch(clickedColor, bodyParts[2].targetRGB)) {
-        setSelectedPart(2) // おなか
+        setSelectedPart(2) // はら
       } else {
         setSelectedPart(null)
       }
@@ -552,7 +552,7 @@ export default function ResultPage() {
                 <Card className="p-2 md:p-3 bg-blue-50 border-2 border-blue-300 flex-shrink-0">
                   <h2 className="text-base md:text-lg font-bold text-center mb-1">クイズ</h2>
                   <p className="text-xs md:text-sm text-center mb-1 leading-snug">
-                    こんちゅうのからだを、あたま・むね・おなかにわけるせんを2ほんひいてね！
+                    こんちゅうのからだを、あたま・むね・はらにわけるせんを2ほんひいてね！
                   </p>
                   <p className="text-xs text-center text-gray-600">がめんをタップして、せんをひこう</p>
                 </Card>
@@ -670,7 +670,7 @@ export default function ResultPage() {
       <span
         className="inline-block font-bold text-red-600 cursor-pointer hover:underline hover:bg-red-100 px-1 rounded transition-colors"
         onClick={() => setSelectedPart(2)}
-      >おなか</span>（はら）
+      >はら</span>
       の3つのぶぶんにわかれています。
     </p>
     <p>
