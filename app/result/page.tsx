@@ -655,33 +655,37 @@ export default function ResultPage() {
                     </div>
 
                     <Card className="p-3 md:p-4 bg-gradient-to-r from-blue-50 to-green-50 border-2 border-blue-300 flex-shrink-0 shadow-sm">
-  <p className="text-sm md:text-base leading-relaxed text-gray-800">
-    <strong className="text-base md:text-lg text-gray-900 block mb-1">💡 こんちゅうのからだ：</strong>
-    こんちゅうのからだは、
-    <span
-      className="font-bold text-blue-600 cursor-pointer hover:underline hover:bg-blue-100 px-1 rounded transition-colors"
-      onClick={() => setSelectedPart(0)}
-    >あたま</span>・
-    <span
-      className="font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
-      onClick={() => setSelectedPart(1)}
-    >むね</span>・
-    <span
-      className="font-bold text-red-600 cursor-pointer hover:underline hover:bg-red-100 px-1 rounded transition-colors"
-      onClick={() => setSelectedPart(2)}
-    >おなか</span>（はら）
-    の3つのぶぶんにわかれています。
-    <span
-      className="font-bold text-purple-600 cursor-pointer hover:underline hover:bg-purple-100 px-1 rounded transition-colors"
-      onClick={() => setSelectedPart(3)}
-    >あし</span>
-    は6ほんあって、すべて
-    <span
-      className="font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
-      onClick={() => setSelectedPart(1)}
-    >むね</span>
-    からはえています。
-  </p>
+  <strong className="text-base md:text-lg text-gray-900 block mb-2">💡 こんちゅうのからだ：</strong>
+  <div className="text-sm md:text-base leading-relaxed text-gray-800 space-y-2 md:space-y-3">
+    <p>
+      こんちゅうのからだは、
+      <span
+        className="inline-block font-bold text-blue-600 cursor-pointer hover:underline hover:bg-blue-100 px-1 rounded transition-colors"
+        onClick={() => setSelectedPart(0)}
+      >あたま</span>・
+      <span
+        className="inline-block font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
+        onClick={() => setSelectedPart(1)}
+      >むね</span>・
+      <span
+        className="inline-block font-bold text-red-600 cursor-pointer hover:underline hover:bg-red-100 px-1 rounded transition-colors"
+        onClick={() => setSelectedPart(2)}
+      >おなか</span>（はら）
+      の3つのぶぶんにわかれています。
+    </p>
+    <p>
+      <span
+        className="inline-block font-bold text-purple-600 cursor-pointer hover:underline hover:bg-purple-100 px-1 rounded transition-colors"
+        onClick={() => setSelectedPart(3)}
+      >あし</span>
+      は6ほんあって、すべて
+      <span
+        className="inline-block font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
+        onClick={() => setSelectedPart(1)}
+      >むね</span>
+      からはえています。
+    </p>
+  </div>
 </Card>
                   </>
                 ) : (
