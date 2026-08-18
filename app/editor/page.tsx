@@ -5,14 +5,22 @@ import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-// ★変更: Wand2 (魔法の杖) を追加
-import { ArrowLeft, Eraser, Paintbrush, RotateCcw, Sparkles, ZoomIn, ZoomOut, Lock, Unlock, Wand2 } from "lucide-react"
+import { ArrowLeft, Eraser, Paintbrush, RotateCcw, Scan, Sparkles, ZoomIn, ZoomOut, Wand2 } from "lucide-react"
 import Link from "next/link"
+import { readExperimentSession } from "@/lib/experiment-session"
+import {
+  beginEditorMetrics,
+  completeEditorMetrics,
+  getCurrentTaskType,
+  incrementCorrectionCount,
+} from "@/lib/task-metrics"
 
 type BodyPartType = "head" | "thorax" | "abdomen" | "legs"
 type BrushSizeType = "small" | "medium" | "large"
-// ★変更: sam を追加
-type ToolType = "brush" | "eraser" | "zoom-in" | "zoom-out" | "sam"
+type ToolType = "brush" | "eraser" | "zoom-in" | "zoom-out" | "sam" | "box"
+type CorrectionMode = "touch" | "box" | "brush"
+type BoxPoint = { x: number; y: number }
+type BoxDraft = { start: BoxPoint; current: BoxPoint; pointerId: number }
 
 const bodyPartColors = {
   head: "rgb(31, 119, 180)",
@@ -54,10 +62,13 @@ export default function EditorPage() {
   const guardCanvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const cursorRef = useRef<HTMLDivElement>(null)
+  const boxDraftRef = useRef<BoxDraft | null>(null)
+  const drawingActiveRef = useRef(false)
 
   const [isDrawing, setIsDrawing] = useState(false)
   const [brushSize, setBrushSize] = useState<BrushSizeType>("medium")
-  const [tool, setTool] = useState<ToolType>("brush") // 初期値をbrushに
+  const [tool, setTool] = useState<ToolType>("sam")
+  const [correctionMode, setCorrectionMode] = useState<CorrectionMode>("touch")
   const [selectedPart, setSelectedPart] = useState<BodyPartType>("head")
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null)
   const [history, setHistory] = useState<ImageData[]>([])
@@ -65,9 +76,44 @@ export default function EditorPage() {
   const [zoom, setZoom] = useState(1.0)
   const [useGuard, setUseGuard] = useState(true)
   const [isHoveringCanvas, setIsHoveringCanvas] = useState(false)
+  const [isCanvasInteracting, setIsCanvasInteracting] = useState(false)
+  const [boxDraft, setBoxDraft] = useState<BoxDraft | null>(null)
+  const [boxMessage, setBoxMessage] = useState<string | null>(null)
   
-  // ★追加: SAM処理中かどうかのフラグ
   const [isProcessingAI, setIsProcessingAI] = useState(false)
+  const [isSaving, setIsSaving] = useState(false) // ★追加: 保存中フラグ
+  const [isTutorial, setIsTutorial] = useState(false)
+
+  useEffect(() => {
+    setIsTutorial(getCurrentTaskType() === "tutorial")
+  }, [])
+
+  const restartAfterSessionLoss = () => {
+    alert("AIとのつながりが切れました。いまの画像をもう一度よみこみます。")
+    sessionStorage.removeItem("segmentedImage")
+    sessionStorage.removeItem("editedMask")
+    sessionStorage.removeItem("thoraxTop")
+    sessionStorage.removeItem("thoraxBottom")
+
+    const experimentSession = readExperimentSession()
+    if (
+      experimentSession?.status === "active" &&
+      sessionStorage.getItem("insectImage")
+    ) {
+      router.replace("/processing")
+    } else {
+      router.replace("/")
+    }
+  }
+
+  const requireSessionId = () => {
+    const experimentSession = readExperimentSession()
+    if (!experimentSession || experimentSession.status !== "active") {
+      router.replace("/")
+      return null
+    }
+    return experimentSession.sessionId
+  }
 
   useEffect(() => {
     const handleResize = () => {
@@ -77,7 +123,6 @@ export default function EditorPage() {
     return () => window.removeEventListener("resize", handleResize)
   }, [originalImage])
 
- // 1. 【追加】この関数を、 handleResize の定義の下あたりに追加してください
   const updateGuardCanvas = () => {
     const maskCanvas = maskCanvasRef.current
     const guardCanvas = guardCanvasRef.current
@@ -85,25 +130,22 @@ export default function EditorPage() {
     const guardCtx = guardCanvas.getContext("2d")
     if (!guardCtx) return
 
-    // ガード用キャンバスをクリアして、現在のマスクをコピー（同期）する
     guardCtx.clearRect(0, 0, guardCanvas.width, guardCanvas.height)
     guardCtx.drawImage(maskCanvas, 0, 0)
   }
 
-  // カーソルの更新Effect
   useEffect(() => {
     if (!cursorRef.current) return
     const diameter = brushSizes[brushSize] * 2 * zoom
     cursorRef.current.style.width = `${diameter}px`
     cursorRef.current.style.height = `${diameter}px`
-    
+
     if (tool === 'eraser') {
         cursorRef.current.style.borderColor = '#ffffff'
         cursorRef.current.style.backgroundColor = 'rgba(255, 255, 255, 0.3)'
         cursorRef.current.style.boxShadow = '0 0 4px rgba(0,0,0,0.5)'
         cursorRef.current.style.borderRadius = '50%'
     } else if (tool === 'sam') {
-        // ★追加: SAMツールのカーソル（十字キーのような見た目に変更）
         cursorRef.current.style.width = '20px'
         cursorRef.current.style.height = '20px'
         cursorRef.current.style.borderColor = 'white'
@@ -124,9 +166,13 @@ export default function EditorPage() {
     const maskData = sessionStorage.getItem("segmentedImage")
 
     if (!imageData) {
-      router.push("/upload")
+      router.push(
+        getCurrentTaskType() === "tutorial" ? "/tutorial" : "/upload",
+      )
       return
     }
+
+    beginEditorMetrics()
 
     const canvas = canvasRef.current
     const maskCanvas = maskCanvasRef.current
@@ -155,7 +201,6 @@ export default function EditorPage() {
           height = MAX_SIZE
         }
       }
-
 
       canvas.width = width
       canvas.height = height
@@ -190,38 +235,37 @@ export default function EditorPage() {
     img.src = imageData
   }, [router])
 
-    const recalcLinesFromMask = async () => {
-      
+  const recalcLinesFromMask = async () => {
     const maskCanvas = maskCanvasRef.current
     if (!maskCanvas) return
 
     try {
       const currentMaskBase64 = maskCanvas.toDataURL("image/png")
-      const sessionId = sessionStorage.getItem("sessionId") // ← 追加
+      const sessionId = requireSessionId()
+      if (!sessionId) return
 
       const formData = new FormData()
       formData.append("current_mask", currentMaskBase64)
-      if (sessionId) formData.append("session_id", sessionId) // ← 追加
+      formData.append("session_id", sessionId)
 
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/recalc_lines`, {
         method: "POST",
         body: formData,
       })
 
-      if (!response.ok) throw new Error("Recalc Failed")
+      if (!response.ok) {
+        if (response.status === 400 || response.status === 404) {
+          restartAfterSessionLoss()
+          return
+        }
+        throw new Error("Recalc Failed")
+      }
 
       const data = await response.json()
 
-      // 新しい線の位置(比率)を保存
       if (data.thorax_top !== undefined) {
         sessionStorage.setItem("thoraxTop", data.thorax_top.toString())
         sessionStorage.setItem("thoraxBottom", data.thorax_bottom.toString())
-        
-        // ★重要: ここでReactのstateも更新して、エディタ上の黄色い線を即座に動かす
-        // Editorページ内で thoraxTop などの state を持っている場合は更新してください
-        // setThoraxTop(data.thorax_top) 
-        // setThoraxBottom(data.thorax_bottom)
-        
         console.log("Lines updated based on brush strokes")
       }
     } catch (e) {
@@ -229,75 +273,59 @@ export default function EditorPage() {
     }
   }
 
-   // ... (前略)
-
-  // ★修正: デモ動画用に「からだのつくり（構造）」の色で画像を生成して保存する関数
   const downloadDemoImage = () => {
     const canvas = canvasRef.current
     const maskCanvas = maskCanvasRef.current
     if (!canvas || !maskCanvas) return
 
     try {
-      // 1. 境界線データの取得 (比率)
-      // sessionStorage には最新の計算結果が入っているはずです
       const storedTop = sessionStorage.getItem("thoraxTop")
       const storedBottom = sessionStorage.getItem("thoraxBottom")
       const ratioTop = storedTop ? parseFloat(storedTop) : 0.33
       const ratioBottom = storedBottom ? parseFloat(storedBottom) : 0.66
 
-      // 2. 合成用の仮キャンバスを作成
       const tempCanvas = document.createElement("canvas")
       tempCanvas.width = canvas.width
       tempCanvas.height = canvas.height
       const ctx = tempCanvas.getContext("2d")
       if (!ctx) return
 
-      // 3. 元の昆虫画像を描画
       ctx.drawImage(canvas, 0, 0)
 
-      // 4. マスクデータを取得して「構造色」に塗り替える
       const maskCtx = maskCanvas.getContext("2d")
       if (!maskCtx) return
       
       const width = canvas.width
       const height = canvas.height
       
-      // マスクのピクセルデータを取得
       const maskImageData = maskCtx.getImageData(0, 0, width, height)
       const data = maskImageData.data
 
-      // 色定義 (Resultページと同じもの)
-      const COLOR_HEAD = [31, 119, 180]    // 青
-      const COLOR_THORAX = [44, 160, 44]  // 緑
-      const COLOR_ABDOMEN = [214, 39, 40] // 赤
-      const COLOR_LEG = [148, 103, 189]   // 紫
+      const COLOR_HEAD = [31, 119, 180]
+      const COLOR_THORAX = [44, 160, 44]
+      const COLOR_ABDOMEN = [214, 39, 40]
+      const COLOR_LEG = [148, 103, 189]
 
-      // Y座標の境界線 (ピクセル)
       const yHeadEnd = ratioTop * height
       const yThoraxEnd = ratioBottom * height
 
-      // 全ピクセルを走査して色を変換
       for (let i = 0; i < data.length; i += 4) {
         const r = data[i]
         const g = data[i + 1]
         const b = data[i + 2]
         const a = data[i + 3]
 
-        if (a === 0) continue // 塗られていない場所はスキップ
+        if (a === 0) continue
 
-        // 足判定 (紫に近いか)
         const distLeg = Math.abs(r - COLOR_LEG[0]) + Math.abs(g - COLOR_LEG[1]) + Math.abs(b - COLOR_LEG[2])
         const isLeg = distLeg < 80
 
         const pixelIndex = i / 4
         const y = Math.floor(pixelIndex / width)
 
-        // 色の塗り替えロジック
         if (isLeg) {
-             // 足は紫にする
              data[i] = COLOR_LEG[0]; data[i+1] = COLOR_LEG[1]; data[i+2] = COLOR_LEG[2]
         } else {
-             // 体はY座標に応じて青・緑・赤にする
              if (y < yHeadEnd) {
                  data[i] = COLOR_HEAD[0]; data[i+1] = COLOR_HEAD[1]; data[i+2] = COLOR_HEAD[2]
              } else if (y < yThoraxEnd) {
@@ -306,12 +334,9 @@ export default function EditorPage() {
                  data[i] = COLOR_ABDOMEN[0]; data[i+1] = COLOR_ABDOMEN[1]; data[i+2] = COLOR_ABDOMEN[2]
              }
         }
-        // 透明度を設定 (少し透けさせる)
         data[i + 3] = 180 
       }
 
-      // 5. 塗り替えたマスク画像を、元画像の上に重ねる
-      // (putImageDataだと透明度がうまく合成されないことがあるため、一度別キャンバスを経由)
       const coloredMaskCanvas = document.createElement("canvas")
       coloredMaskCanvas.width = width
       coloredMaskCanvas.height = height
@@ -321,15 +346,10 @@ export default function EditorPage() {
           coloredCtx.putImageData(maskImageData, 0, 0)
           ctx.drawImage(coloredMaskCanvas, 0, 0)
       }
-
-
-
     } catch (e) {
       console.error("Demo download failed:", e)
     }
   }
-
-  // ... (handleFinish などで呼び出し)
 
   const redrawCanvas = (img: HTMLImageElement | null = null) => {
     const canvas = canvasRef.current
@@ -374,12 +394,11 @@ export default function EditorPage() {
     cursorRef.current.style.transform = `translate(${clientX}px, ${clientY}px) translate(-50%, -50%)`
   }
 
-  // --- 描画開始 (ブラシ・消しゴム用) ---
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (tool === "sam") return // SAMモードの時はドラッグ描画しない
-    if (tool === "zoom-in") { handleZoom(0.5); return }
-    if (tool === "zoom-out") { handleZoom(-0.5); return }
+    if (correctionMode !== "brush" || (tool !== "brush" && tool !== "eraser")) return
+    if (drawingActiveRef.current) return
 
+    drawingActiveRef.current = true
     setIsDrawing(true)
     updateCursorPosition(e)
     const pos = getCanvasPosition(e)
@@ -390,22 +409,21 @@ export default function EditorPage() {
   }
 
   const stopDrawing = () => {
-    if (isDrawing) {
+    if (drawingActiveRef.current) {
+      drawingActiveRef.current = false
       setIsDrawing(false)
       setLastPos(null)
       saveToHistory()
+      incrementCorrectionCount(selectedPart, "manual")
       
-      // ★ここは updateGuardCanvas() ではなく、
-      // さきほど作成した「線を再計算する関数」を呼び出します！
       if (tool === "brush" || tool === "eraser") {
           recalcLinesFromMask() 
       }
     }
   }
 
-  // ★追加: クリック時の処理 (SAM用)
   const handleCanvasClick = async (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (tool !== "sam" || isProcessingAI) return
+    if (correctionMode !== "touch" || tool !== "sam" || isProcessingAI) return
 
     const pos = getCanvasPosition(e)
     if (!pos) return
@@ -416,28 +434,33 @@ export default function EditorPage() {
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
         
-        // 現在のマスク画像をサーバーに送る
         const currentMaskBase64 = maskCanvas.toDataURL("image/png")
-        const sessionId = sessionStorage.getItem("sessionId") // ← 追加
+        const sessionId = requireSessionId()
+        if (!sessionId) return
 
         const formData = new FormData()
         formData.append('x', Math.round(pos.x).toString())
         formData.append('y', Math.round(pos.y).toString())
         formData.append('label_part', selectedPart)
         formData.append('current_mask', currentMaskBase64) 
-        if (sessionId) formData.append('session_id', sessionId) // ← 追加
+        formData.append('session_id', sessionId)
 
        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/refine`, {
             method: 'POST',
             body: formData,
         })
         
-        if (!response.ok) throw new Error("API Error")
+        if (!response.ok) {
+          if (response.status === 400 || response.status === 404) {
+            restartAfterSessionLoss()
+            return
+          }
+          throw new Error("API Error")
+        }
 
         const data = await response.json()
         const newMaskBase64 = data.segmented_image_base64
         
-        // ★追加: サーバーから新しい境界線データを受け取って更新
         if (data.thorax_top !== undefined) {
              sessionStorage.setItem("thoraxTop", data.thorax_top.toString())
              sessionStorage.setItem("thoraxBottom", data.thorax_bottom.toString())
@@ -450,12 +473,11 @@ export default function EditorPage() {
                  maskCtx.clearRect(0,0, maskCanvas.width, maskCanvas.height)
                  maskCtx.drawImage(img, 0, 0, maskCanvas.width, maskCanvas.height)
                  
-                 // ★重要: ここでガード（枠）を更新する関数を呼び出す！
-                 // これでAIが塗った場所もブラシで塗れるようになります
                  updateGuardCanvas()
                  
                  redrawCanvas()
                  saveToHistory()
+                 incrementCorrectionCount(selectedPart, "touch")
                  setIsProcessingAI(false)
              }
              img.src = newMaskBase64
@@ -465,6 +487,182 @@ export default function EditorPage() {
         setIsProcessingAI(false)
         alert("AI修正に失敗しました")
     }
+  }
+
+  const getPointerCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+
+    const rect = canvas.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return null
+
+    const x = Math.min(Math.max(e.clientX - rect.left, 0), rect.width)
+    const y = Math.min(Math.max(e.clientY - rect.top, 0), rect.height)
+    return { x, y }
+  }
+
+  const applyRefinedMask = async (data: {
+    segmented_image_base64?: string
+    thorax_top?: number
+    thorax_bottom?: number
+    sam_debug?: unknown
+  }) => {
+    const maskCanvas = maskCanvasRef.current
+    const maskCtx = maskCanvas?.getContext("2d")
+    if (!maskCanvas || !maskCtx || !data.segmented_image_base64) {
+      throw new Error("Refined mask is missing")
+    }
+
+    if (data.thorax_top !== undefined && data.thorax_bottom !== undefined) {
+      sessionStorage.setItem("thoraxTop", data.thorax_top.toString())
+      sessionStorage.setItem("thoraxBottom", data.thorax_bottom.toString())
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const image = new Image()
+      image.onload = () => {
+        maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height)
+        maskCtx.drawImage(image, 0, 0, maskCanvas.width, maskCanvas.height)
+        updateGuardCanvas()
+        redrawCanvas()
+        saveToHistory()
+        resolve()
+      }
+      image.onerror = () => reject(new Error("Failed to load refined mask"))
+      image.src = data.segmented_image_base64 as string
+    })
+
+    if (data.sam_debug) console.debug("SAM box debug:", data.sam_debug)
+  }
+
+  const submitBoxRefinement = async (start: BoxPoint, end: BoxPoint) => {
+    const canvas = canvasRef.current
+    const maskCanvas = maskCanvasRef.current
+    if (!canvas || !maskCanvas || isProcessingAI) return
+
+    const rect = canvas.getBoundingClientRect()
+    const left = Math.min(start.x, end.x)
+    const top = Math.min(start.y, end.y)
+    const right = Math.max(start.x, end.x)
+    const bottom = Math.max(start.y, end.y)
+    const renderedWidth = right - left
+    const renderedHeight = bottom - top
+
+    if (renderedWidth < 20 || renderedHeight < 20) {
+      setBoxMessage("もういちど、ぬりたいところを四角でかこんでね")
+      setBoxDraft(null)
+      return
+    }
+
+    const scaleX = canvas.width / rect.width
+    const scaleY = canvas.height / rect.height
+    const x1 = Math.max(0, Math.min(canvas.width - 1, Math.round(left * scaleX)))
+    const y1 = Math.max(0, Math.min(canvas.height - 1, Math.round(top * scaleY)))
+    const x2 = Math.max(x1 + 1, Math.min(canvas.width, Math.round(right * scaleX)))
+    const y2 = Math.max(y1 + 1, Math.min(canvas.height, Math.round(bottom * scaleY)))
+
+    try {
+      setIsProcessingAI(true)
+      setBoxMessage(null)
+
+      const sessionId = requireSessionId()
+      if (!sessionId) return
+
+      const formData = new FormData()
+      formData.append("x1", x1.toString())
+      formData.append("y1", y1.toString())
+      formData.append("x2", x2.toString())
+      formData.append("y2", y2.toString())
+      formData.append("label_part", selectedPart)
+      formData.append("current_mask", maskCanvas.toDataURL("image/png"))
+      formData.append("session_id", sessionId)
+
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/refine_box`, {
+        method: "POST",
+        body: formData,
+      })
+      const data = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        const detail = typeof data.detail === "string" ? data.detail : "Box refinement failed"
+        const normalizedDetail = detail.toLowerCase()
+        if (
+          normalizedDetail.includes("image not loaded") ||
+          normalizedDetail.includes("no image loaded") ||
+          normalizedDetail.includes("embedding")
+        ) {
+          restartAfterSessionLoss()
+          return
+        }
+        throw new Error(detail)
+      }
+
+      await applyRefinedMask(data)
+      incrementCorrectionCount(selectedPart, "box")
+    } catch (error) {
+      console.error("SAM Box Error", error)
+      setBoxMessage("もういちど、ぬりたいところを四角でかこんでね")
+    } finally {
+      setIsProcessingAI(false)
+      setBoxDraft(null)
+      boxDraftRef.current = null
+    }
+  }
+
+  const handleBoxPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (correctionMode !== "box" || isProcessingAI) return
+    if (e.pointerType === "mouse" && e.button !== 0) return
+
+    const point = getPointerCanvasPoint(e)
+    if (!point) return
+
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const draft = { start: point, current: point, pointerId: e.pointerId }
+    boxDraftRef.current = draft
+    setBoxDraft(draft)
+    setBoxMessage(null)
+    setIsCanvasInteracting(true)
+  }
+
+  const handleBoxPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const draft = boxDraftRef.current
+    if (correctionMode !== "box" || !draft || draft.pointerId !== e.pointerId) return
+
+    const point = getPointerCanvasPoint(e)
+    if (!point) return
+
+    e.preventDefault()
+    const nextDraft = { ...draft, current: point }
+    boxDraftRef.current = nextDraft
+    setBoxDraft(nextDraft)
+  }
+
+  const handleBoxPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const draft = boxDraftRef.current
+    if (correctionMode !== "box" || !draft || draft.pointerId !== e.pointerId) {
+      setIsCanvasInteracting(false)
+      return
+    }
+
+    e.preventDefault()
+    const end = getPointerCanvasPoint(e) ?? draft.current
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+    boxDraftRef.current = null
+    setIsCanvasInteracting(false)
+    void submitBoxRefinement(draft.start, end)
+  }
+
+  const handleBoxPointerCancel = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (boxDraftRef.current?.pointerId !== e.pointerId) return
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+    boxDraftRef.current = null
+    setBoxDraft(null)
+    setIsCanvasInteracting(false)
   }
 
   const getCanvasPosition = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
@@ -520,7 +718,7 @@ export default function EditorPage() {
 
   const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     updateCursorPosition(e)
-    if (!isDrawing) return
+    if (correctionMode !== "brush" || !isDrawing) return
     const pos = getCanvasPosition(e)
     if (!pos) return
     if (lastPos) {
@@ -541,72 +739,124 @@ export default function EditorPage() {
     const newHistory = history.slice(0, -1)
     const previousState = newHistory[newHistory.length - 1]
     if (previousState) {
-      // ★ここが超重要！一度キャンバスを「透明」にしてから描画する
       maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height)
-      
       maskCtx.putImageData(previousState, 0, 0)
       setHistory(newHistory)
       redrawCanvas()
     }
   }
 
-  
-
   const handleNext = async () => {
+    if (isSaving) return // ★追加: 連打防止
+    setIsSaving(true)    // ★追加: 保存中フラグをON
+
+    const sessionId = requireSessionId()
+    if (!sessionId) {
+      setIsSaving(false)
+      return
+    }
+
     const maskCanvas = maskCanvasRef.current
-    if (!maskCanvas) return
+    if (!maskCanvas) {
+      setIsSaving(false)
+      return
+    }
     const userMaskData = maskCanvas.toDataURL("image/png")
     sessionStorage.setItem("editedMask", userMaskData)
 
-    // ★追加: ここでデモ画像をダウンロード！
     downloadDemoImage()
 
-    const shouldSave = window.confirm("研究のためにデータを保存しますか？\n（「はい」で保存、「いいえ」で保存せずに進みます）")
+    const taskMetrics = completeEditorMetrics()
 
-    if (shouldSave) {
+    if (getCurrentTaskType() !== "tutorial") {
+      const experimentSession = readExperimentSession()
       const originalData = sessionStorage.getItem("insectImage")
       const aiMaskData = sessionStorage.getItem("segmentedImage")
       const tTop = sessionStorage.getItem("thoraxTop")
       const tBottom = sessionStorage.getItem("thoraxBottom")
-      if (originalData && aiMaskData) {
-        try {
-          // ★確認ポイント: session_id が確実に送られているか
-          await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/save_log`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              original_base64: originalData,
-              ai_mask_base64: aiMaskData,
-              user_mask_base64: userMaskData,
-              thorax_top: Number(tTop) || 0,
-              thorax_bottom: Number(tBottom) || 0,
-              session_id: sessionStorage.getItem("sessionId") || "unknown" // ← ここ！
-            }),
-          })
-          alert("データを保存しました！ご協力ありがとうございます。")
-        } catch (e) {
-          alert("保存に失敗しましたが、次へ進みます。")
+
+      if (!experimentSession || !originalData || !aiMaskData) {
+        alert("実験記録の情報が足りません。もう一度やりなおしてください。")
+        setIsSaving(false)
+        return
+      }
+
+      try {
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/experiment/task/save`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            participant_id: experimentSession.participantId,
+            session_id: sessionId,
+            session_started_at: experimentSession.startedAt,
+            task_id: taskMetrics.taskId,
+            task_index: taskMetrics.taskIndex,
+            image_name: taskMetrics.imageName,
+            editor_started_at: taskMetrics.editorStartedAt,
+            editor_completed_at: taskMetrics.editorCompletedAt,
+            editor_duration_ms: taskMetrics.editorDurationMs,
+            correction_counts: taskMetrics.correctionCounts,
+            original_base64: originalData,
+            ai_mask_base64: aiMaskData,
+            user_mask_base64: userMaskData,
+            thorax_top: Number(tTop) || 0,
+            thorax_bottom: Number(tBottom) || 0,
+          }),
+        })
+        const responseData = await response.json().catch(() => ({}))
+        if (!response.ok) {
+          throw new Error(
+            typeof responseData.detail === "string"
+              ? responseData.detail
+              : "Save failed",
+          )
         }
+      } catch (e) {
+        console.error("Failed to save experiment task:", e)
+        alert("実験記録を保存できませんでした。通信を確認して、もう一度押してください。")
+        setIsSaving(false)
+        return
       }
     }
+
+    setIsSaving(false) // ★追加: 保存完了後にフラグをOFF
     router.push("/result")
   }
 
   const getCursorStyle = () => {
+    if (correctionMode === "box") return isProcessingAI ? "wait" : "crosshair"
     if (tool === "zoom-in") return "zoom-in"
     if (tool === "zoom-out") return "zoom-out"
     if (tool === "sam" && isProcessingAI) return "wait"
-    if (tool === "sam") return "pointer" // 修正: SAMのときはポインタ
+    if (tool === "sam") return "pointer"
     return "none"
   }
 
+  const selectCorrectionMode = (mode: CorrectionMode) => {
+    setCorrectionMode(mode)
+    setTool(mode === "touch" ? "sam" : mode === "box" ? "box" : "brush")
+    drawingActiveRef.current = false
+    setIsDrawing(false)
+    setLastPos(null)
+    setBoxDraft(null)
+    boxDraftRef.current = null
+    setBoxMessage(null)
+  }
 
-  
+  const boxOverlayStyle = boxDraft
+    ? {
+        left: Math.min(boxDraft.start.x, boxDraft.current.x),
+        top: Math.min(boxDraft.start.y, boxDraft.current.y),
+        width: Math.abs(boxDraft.current.x - boxDraft.start.x),
+        height: Math.abs(boxDraft.current.y - boxDraft.start.y),
+        borderColor: bodyPartColors[selectedPart],
+        backgroundColor: bodyPartColors[selectedPart].replace("rgb(", "rgba(").replace(")", ", 0.18)"),
+      }
+    : null
 
   return (
     <div className="h-screen flex flex-col bg-gradient-to-b from-green-50 to-blue-50 overflow-hidden">
       
-      {/* カスタムカーソル */}
       <div 
         ref={cursorRef}
         className="fixed pointer-events-none z-50 transition-opacity duration-75"
@@ -618,33 +868,33 @@ export default function EditorPage() {
         }}
       />
 
-      {/* ヘッダー部分は変更なし */}
-      <header className="bg-gradient-to-r from-green-500 to-blue-500 text-white py-4 px-4 flex items-center gap-3 shadow-lg flex-shrink-0">
-        <Link href="/upload">
+      <header className="bg-gradient-to-r from-green-500 to-blue-500 text-white py-3 px-4 flex items-center gap-3 shadow-lg flex-shrink-0">
+        <Link href={isTutorial ? "/tutorial" : "/upload"}>
           <Button variant="ghost" size="icon" className="text-white hover:bg-white/20 rounded-full h-12 w-12">
             <ArrowLeft className="w-6 h-6" />
           </Button>
         </Link>
         <div className="flex items-center gap-2">
           <Sparkles className="w-6 h-6" />
-          <h1 className="text-xl md:text-2xl font-bold">こんちゅうをぬろう！</h1>
+          <h1 className="text-xl md:text-2xl font-bold">
+            {isTutorial ? "れんしゅう：こんちゅうをぬろう！" : "こんちゅうをぬろう！"}
+          </h1>
         </div>
       </header>
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
-        <aside className="w-32 sm:w-48 md:w-56 lg:w-64 xl:w-72 flex-shrink-0 flex flex-col p-1.5 sm:p-2 md:p-3 bg-white border-r border-gray-200 overflow-hidden">
+        <aside className="w-[300px] md:w-[320px] lg:w-[340px] xl:w-[360px] flex-shrink-0 flex flex-col p-2 md:p-3 bg-white border-r border-gray-200 overflow-hidden">
           
-          <div className="flex flex-col h-full gap-1.5 sm:gap-2 md:gap-3 overflow-y-auto">
-            {/* 部位選択パネル (変更: 選択時に自動でSAMツールにならないようにする) */}
-            <Card className="p-1.5 sm:p-2 md:p-3 bg-gradient-to-br from-blue-50 to-green-50 shadow-md flex-shrink-0">
-              <h2 className="text-[10px] sm:text-xs md:text-sm font-bold mb-1 sm:mb-2 text-center text-gray-800">
+          <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden">
+            <Card className="p-2 bg-gradient-to-br from-blue-50 to-green-50 shadow-sm flex-shrink-0">
+              <h2 className="text-sm font-bold mb-1.5 text-center text-gray-800">
                 どこをぬる？
               </h2>
-              <div className="grid grid-cols-2 gap-1 sm:gap-1.5">
+              <div className="grid grid-cols-4 gap-1.5">
                 {(Object.keys(bodyPartColors) as BodyPartType[]).map((part) => (
                   <button
                     key={part}
-                    className={`p-1 sm:p-2 rounded-lg font-bold text-[9px] sm:text-xs transition-all transform hover:scale-105 ${
+                    className={`min-w-0 px-1 py-1.5 rounded-lg font-bold text-xs transition-all transform hover:scale-[1.02] ${
                       selectedPart === part ? "ring-2 ring-yellow-400 shadow-lg scale-105" : "hover:shadow-md"
                     }`}
                     style={{
@@ -654,124 +904,127 @@ export default function EditorPage() {
                     }}
                     onClick={() => {
                       setSelectedPart(part)
-                      // ここで強制的にツールを変えないほうが親切かも？
-                      // ユーザーが「AIで修正」を選んでいたらそのままで
                     }}
                   >
-                    <div className="text-base sm:text-xl mb-0.5">{bodyPartEmojis[part]}</div>
-                    <div className="text-[8px] sm:text-[10px]">{bodyPartLabels[part]}</div>
+                    <div className="text-lg leading-none mb-1">{bodyPartEmojis[part]}</div>
+                    <div className="text-xs whitespace-nowrap">{bodyPartLabels[part]}</div>
                   </button>
                 ))}
               </div>
             </Card>
 
-            {/* 道具パネル (変更: AI修正ボタン追加) */}
-            <Card className="p-1.5 sm:p-2 md:p-3 bg-gradient-to-br from-purple-50 to-pink-50 shadow-md flex-shrink-0">
-              <h3 className="text-[10px] sm:text-xs md:text-sm font-bold mb-1 sm:mb-2 text-center text-gray-800">
-                どうぐ
-              </h3>
-              <div className="grid grid-cols-2 gap-1 sm:gap-1.5">
-                {/* ★追加: AI修正ボタン */}
+            <Card className="p-2 shadow-sm flex-shrink-0">
+              <h2 className="text-sm font-bold mb-1.5 text-center text-gray-800">
+                なおしかたを えらぼう
+              </h2>
+              <div className="grid grid-cols-3 gap-1.5" role="tablist" aria-label="なおしかた">
                 <Button
                   size="sm"
-                  className={`col-span-2 h-10 sm:h-12 md:h-14 flex flex-col gap-0.5 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
-                    tool === "sam"
-                      ? "bg-gradient-to-r from-purple-500 to-indigo-600 text-white shadow-lg scale-105 ring-2 ring-yellow-400"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-300"
-                  }`}
-                  onClick={() => setTool("sam")}
+                  role="tab"
+                  aria-selected={correctionMode === "touch"}
+                  className={correctionMode === "touch" ? "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-purple-600 text-white" : "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-gray-100 text-gray-700"}
+                  onClick={() => selectCorrectionMode("touch")}
                 >
-                  <div className="flex items-center gap-2">
-                     <Wand2 className="w-4 h-4 sm:w-5 sm:h-5 animate-pulse" />
-                     <span className="text-[10px] sm:text-xs">AIでしゅうせい</span>
-                  </div>
-                </Button>
-
-                <Button
-                  size="sm"
-                  className={`h-10 sm:h-12 md:h-14 flex flex-col gap-0.5 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
-                    tool === "brush"
-                      ? "bg-blue-500 hover:bg-blue-600 shadow-lg scale-105 ring-2 ring-yellow-400"
-                      : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                  }`}
-                  onClick={() => setTool("brush")}
-                >
-                  <Paintbrush className="w-3 h-3 sm:w-4 sm:h-4" />
-                  <span className="text-[8px] sm:text-[10px]">ブラシ</span>
+                  <Wand2 className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
+                  <span>タッチで<br />おまかせ</span>
                 </Button>
                 <Button
                   size="sm"
-                  className={`h-10 sm:h-12 md:h-14 flex flex-col gap-0.5 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
-                    tool === "eraser"
-                      ? "bg-orange-500 hover:bg-orange-600 shadow-lg scale-105 ring-2 ring-yellow-400"
-                      : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                  }`}
-                  onClick={() => setTool("eraser")}
+                  role="tab"
+                  aria-selected={correctionMode === "box"}
+                  className={correctionMode === "box" ? "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-teal-600 text-white" : "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-gray-100 text-gray-700"}
+                  onClick={() => selectCorrectionMode("box")}
                 >
-                  <Eraser className="w-3 h-3 sm:w-4 sm:h-4" />
-                  <span className="text-[8px] sm:text-[10px]">けしゴム</span>
-                </Button>
-                
-                {/* 拡大縮小ボタン (そのまま) */}
-                <Button
-                  size="sm"
-                  className={`h-10 sm:h-12 md:h-14 flex flex-col gap-0.5 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
-                    tool === "zoom-in"
-                      ? "bg-teal-500 hover:bg-teal-600 shadow-lg scale-105 ring-2 ring-yellow-400"
-                      : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                  }`}
-                  onClick={() => setTool("zoom-in")}
-                >
-                  <ZoomIn className="w-3 h-3 sm:w-4 sm:h-4" />
-                  <span className="text-[8px] sm:text-[10px]">かくだい</span>
+                  <Scan className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
+                  <span>かこんで<br />おまかせ</span>
                 </Button>
                 <Button
                   size="sm"
-                  className={`h-10 sm:h-12 md:h-14 flex flex-col gap-0.5 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
-                    tool === "zoom-out"
-                      ? "bg-teal-500 hover:bg-teal-600 shadow-lg scale-105 ring-2 ring-yellow-400"
-                      : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                  }`}
-                  onClick={() => setTool("zoom-out")}
+                  role="tab"
+                  aria-selected={correctionMode === "brush"}
+                  className={correctionMode === "brush" ? "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-blue-600 text-white" : "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-gray-100 text-gray-700"}
+                  onClick={() => selectCorrectionMode("brush")}
                 >
-                  <ZoomOut className="w-3 h-3 sm:w-4 sm:h-4" />
-                  <span className="text-[8px] sm:text-[10px]">しゅくしょう</span>
+                  <Paintbrush className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
+                  <span>じぶんで<br />なおす</span>
                 </Button>
               </div>
-
-              {/*<div className="mt-2 flex items-center justify-between px-1">
-                  <span className="text-[9px] sm:text-xs font-bold text-gray-700">
-                      {useGuard ? "わくからはみでない" : "じゆうにぬれるよ"}
-                  </span>
-                  <div 
-                    className="cursor-pointer"
-                    onClick={() => setUseGuard(!useGuard)}
-                  >
-                      {useGuard ? (
-                          <div className="bg-green-500 text-white p-1 rounded-full"><Lock className="w-3 h-3" /></div>
-                      ) : (
-                          <div className="bg-gray-400 text-white p-1 rounded-full"><Unlock className="w-3 h-3" /></div>
-                      )}
-                  </div>
-              </div>*/}
-              
+              <p className="mt-1.5 text-xs text-center leading-snug text-gray-600">
+                {correctionMode === "touch"
+                  ? "なおしたいところを、ポンとタッチしてね"
+                  : correctionMode === "box"
+                    ? "ぬりたいところを、四角でかこんでね"
+                    : "ペンやけしゴムで、すこしずつなおせるよ"}
+              </p>
+              {boxMessage && correctionMode === "box" && (
+                <p className="mt-1.5 rounded-lg bg-amber-100 px-2 py-1.5 text-center text-xs font-bold text-amber-800">
+                  {boxMessage}
+                </p>
+              )}
             </Card>
 
-            <Card className="p-1.5 sm:p-2 md:p-3 bg-gradient-to-br from-yellow-50 to-orange-50 shadow-md flex-shrink-0">
-              <h3 className="text-[10px] sm:text-xs md:text-sm font-bold mb-1 sm:mb-2 text-center text-gray-800">
+            <Card className="p-2 bg-gradient-to-br from-purple-50 to-pink-50 shadow-sm flex-shrink-0">
+              <h3 className="text-sm font-bold mb-1.5 text-center text-gray-800">
+                {correctionMode === "touch" ? "タッチのしかた" : correctionMode === "box" ? "かこみかた" : "どうぐ"}
+              </h3>
+              {correctionMode === "touch" && (
+                <div className="mb-2 flex items-center justify-center gap-2 rounded-lg bg-purple-100 px-3 py-2 text-center text-xs font-bold text-purple-800">
+                  <Wand2 className="h-4 w-4 flex-shrink-0" />
+                  色をえらんで、なおしたいところを1回タッチ
+                </div>
+              )}
+              {correctionMode === "box" && (
+                <div className="mb-2 flex items-center justify-center gap-2 rounded-lg bg-teal-100 px-3 py-2 text-center text-xs font-bold text-teal-800">
+                  <Scan className="h-4 w-4 flex-shrink-0" />
+                  ぬりたいところを、指やマウスで四角にかこむ
+                </div>
+              )}
+              {correctionMode === "brush" && (
+                <div className="grid grid-cols-2 gap-1.5">
+                  <Button
+                    size="sm"
+                    className={`h-10 flex-col gap-0.5 text-xs font-bold transition-all hover:scale-[1.02] ${
+                      tool === "brush"
+                        ? "bg-blue-500 hover:bg-blue-600 shadow-lg scale-105 ring-2 ring-yellow-400"
+                        : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                    }`}
+                    onClick={() => setTool("brush")}
+                  >
+                    <Paintbrush className="w-3 h-3 sm:w-4 sm:h-4" />
+                    <span className="text-[8px] sm:text-[10px]">ブラシ</span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    className={`h-10 flex-col gap-0.5 text-xs font-bold transition-all hover:scale-[1.02] ${
+                      tool === "eraser"
+                        ? "bg-orange-500 hover:bg-orange-600 shadow-lg scale-105 ring-2 ring-yellow-400"
+                        : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                    }`}
+                    onClick={() => setTool("eraser")}
+                  >
+                    <Eraser className="w-3 h-3 sm:w-4 sm:h-4" />
+                    <span className="text-[8px] sm:text-[10px]">けしゴム</span>
+                  </Button>
+                </div>
+              )}
+            </Card>
+
+            <Card className={`${correctionMode !== "brush" ? "hidden" : ""} p-2 bg-gradient-to-br from-yellow-50 to-orange-50 shadow-sm flex-shrink-0`}>
+              <h3 className="text-sm font-bold mb-1.5 text-center text-gray-800">
                 おおきさ
               </h3>
-              <div className="flex flex-col gap-1 sm:gap-1.5">
+              <div className="grid grid-cols-3 gap-1.5">
                 {(Object.keys(brushSizes) as BrushSizeType[]).reverse().map((size) => (
                   <Button
                     key={size}
                     size="sm"
-                    className={`h-8 sm:h-10 flex items-center justify-between px-1.5 sm:px-2 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
+                    className={`h-9 flex items-center justify-center gap-1 px-1 text-xs font-bold transition-all hover:scale-[1.02] ${
                       brushSize === size
                         ? "bg-purple-500 hover:bg-purple-600 text-white shadow-lg scale-105 ring-2 ring-yellow-400"
                         : "bg-white text-gray-700 hover:bg-gray-100 border-2 border-gray-300"
                     }`}
                     onClick={() => setBrushSize(size)}
+                    disabled={correctionMode !== "brush"}
                   >
                     <span className="text-[8px] sm:text-[10px]">{brushSizeLabels[size]}</span>
                     <div
@@ -802,15 +1055,20 @@ export default function EditorPage() {
 
             <Button
               size="sm"
-              className="h-10 sm:h-12 md:h-14 text-[9px] sm:text-xs md:text-sm font-bold bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 shadow-xl transform hover:scale-105 transition-all flex-shrink-0"
+              disabled={isSaving}
+              className={`h-10 sm:h-12 md:h-14 text-[9px] sm:text-xs md:text-sm font-bold shadow-xl transform transition-all flex-shrink-0 ${
+                isSaving
+                  ? "bg-gray-400 cursor-not-allowed"
+                  : "bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 hover:scale-105"
+              }`}
               onClick={handleNext}
             >
-              できた！つぎへ →
+              {isSaving ? "ほぞんちゅう..." : "できた！つぎへ →"}
             </Button>
           </div>
         </aside>
 
-        <main className="flex-1 min-w-0 min-h-0 flex overflow-hidden bg-gradient-to-br from-green-50 via-blue-50 to-purple-50">
+        <main className="relative flex-1 min-w-0 min-h-0 flex overflow-hidden bg-gradient-to-br from-green-50 via-blue-50 to-purple-50">
           <div ref={containerRef} className="flex-1 w-full h-full overflow-auto flex p-4">
             
             <div 
@@ -825,7 +1083,27 @@ export default function EditorPage() {
                 className="w-full h-full touch-none rounded-lg"
                 style={{ cursor: getCursorStyle() }}
                 onMouseEnter={() => setIsHoveringCanvas(true)}
-                onMouseLeave={() => { setIsHoveringCanvas(false); stopDrawing() }}
+                onMouseLeave={() => {
+                  setIsHoveringCanvas(false)
+                  if (correctionMode !== "box") {
+                    setIsCanvasInteracting(false)
+                    stopDrawing()
+                  }
+                }}
+
+                onPointerDown={(e) => {
+                  if (correctionMode === "box") handleBoxPointerDown(e)
+                  else setIsCanvasInteracting(true)
+                }}
+                onPointerMove={handleBoxPointerMove}
+                onPointerUp={(e) => {
+                  if (correctionMode === "box") handleBoxPointerUp(e)
+                  else setIsCanvasInteracting(false)
+                }}
+                onPointerCancel={(e) => {
+                  if (correctionMode === "box") handleBoxPointerCancel(e)
+                  else setIsCanvasInteracting(false)
+                }}
                 
                 onMouseDown={startDrawing}
                 onMouseMove={draw}
@@ -835,12 +1113,55 @@ export default function EditorPage() {
                 onTouchMove={draw}
                 onTouchEnd={stopDrawing}
 
-                // ★追加: クリック時の処理
                 onClick={handleCanvasClick}
               />
+              {correctionMode === "box" && boxOverlayStyle && (
+                <div
+                  className="pointer-events-none absolute z-20 border-[3px] shadow-[0_0_0_1px_rgba(255,255,255,0.9)]"
+                  style={boxOverlayStyle}
+                  aria-hidden="true"
+                />
+              )}
+              {correctionMode === "box" && isProcessingAI && (
+                <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-white/25">
+                  <div className="rounded-full bg-white/95 px-4 py-2 text-sm font-bold text-teal-800 shadow-lg">
+                    AIがかくにん中...
+                  </div>
+                </div>
+              )}
               <canvas ref={maskCanvasRef} className="hidden" />
               <canvas ref={guardCanvasRef} className="hidden" />
             </div>
+          </div>
+
+          <div
+            className={`absolute bottom-4 right-4 z-20 flex items-center gap-2 rounded-full border border-white/70 bg-white/85 p-2 shadow-lg backdrop-blur-sm transition-opacity duration-200 ${
+              isCanvasInteracting ? "pointer-events-none opacity-0" : "opacity-100"
+            }`}
+            aria-hidden={isCanvasInteracting}
+          >
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              className="h-12 w-12 rounded-full bg-white text-teal-700 shadow-sm hover:bg-teal-50"
+              onClick={() => handleZoom(0.5)}
+              aria-label="画像を拡大する"
+              title="かくだい"
+            >
+              <ZoomIn className="h-6 w-6" />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              className="h-12 w-12 rounded-full bg-white text-teal-700 shadow-sm hover:bg-teal-50"
+              onClick={() => handleZoom(-0.5)}
+              aria-label="画像を縮小する"
+              title="しゅくしょう"
+            >
+              <ZoomOut className="h-6 w-6" />
+            </Button>
           </div>
         </main>
       </div>

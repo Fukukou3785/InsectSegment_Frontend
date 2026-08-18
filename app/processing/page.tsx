@@ -1,16 +1,33 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Card } from "@/components/ui/card"
 import { Spinner } from "@/components/ui/spinner"
+import { readExperimentSession } from "@/lib/experiment-session"
+import { getCurrentTaskType } from "@/lib/task-metrics"
 
 export default function ProcessingPage() {
   const router = useRouter()
+  const hasStartedRef = useRef(false)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState("がぞうをよみこんでいます...")
+  const [isTutorial, setIsTutorial] = useState(false)
 
   useEffect(() => {
+    setIsTutorial(getCurrentTaskType() === "tutorial")
+  }, [])
+
+  useEffect(() => {
+    if (hasStartedRef.current) return
+    hasStartedRef.current = true
+
+    const experimentSession = readExperimentSession()
+    if (!experimentSession || experimentSession.status !== "active") {
+      router.replace("/")
+      return
+    }
+
     // 1. 画像がない場合は戻る
     const image = sessionStorage.getItem("insectImage")
     if (!image) {
@@ -25,29 +42,37 @@ export default function ProcessingPage() {
         // 「data:image/png;base64,」の部分を消さずにそのまま送ります！
         // const imageToSegment = image.replace(/^data:image\/\w+;base64,/, "")
 
-        // ★名札（UUID）を作成して保存する
-        let sessionId = sessionStorage.getItem("sessionId");
-        if (!sessionId) {
-          sessionId = crypto.randomUUID(); // ランダムなIDを生成
-          sessionStorage.setItem("sessionId", sessionId);
-        }
+        // 実験開始時に生成したUUIDを、SAM状態の識別にも共通利用する
+        const sessionId = experimentSession.sessionId
 
         const formData = new FormData();
-        // ★修正：imageToSegment ではなく、そのままの image を送る！
-        formData.append("image_base64", image); 
-        formData.append("session_id", sessionId || "unknown");
 
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/segment`, {
-          method: 'POST',
-          body: formData, // JSONではなく、FormDataの箱をそのまま送る
-        });
-        
-        if (!response.ok) {
-          throw new Error('AIしょりにしっぱいしました');
+        const imageName = sessionStorage.getItem("imageName")
+       if (imageName) {
+         formData.append("image_name", imageName)
         }
+        // ★修正：imageToSegment ではなく、そのままの image を送る！
+        formData.append("image_base64", image);
+        formData.append("session_id", sessionId);
 
-        // 結果を受け取る
-        const result = await response.json();
+// ★修正：通信と3秒タイマーを同時に待つ安全な書き方
+        const taskType = getCurrentTaskType()
+        const segmentPath =
+          taskType === "tutorial"
+            ? "/api/tutorial/segment"
+            : "/api/segment"
+        const fetchPromise = fetch(`${process.env.NEXT_PUBLIC_API_URL}${segmentPath}`, {
+          method: "POST",
+          body: formData,
+        }).then(async (res) => {
+          if (!res.ok) throw new Error("AIしょりにしっぱいしました");
+          return res.json(); // ★ここで1回だけ確実に中身を取り出して返す
+        });
+
+        const timerPromise = new Promise((resolve) => setTimeout(resolve, 3000)); // 3秒待つ
+
+        // 両方が終わるまで待ち、結果（result）を受け取る
+        const [result] = await Promise.all([fetchPromise, timerPromise]);
 
         // データの保存
         sessionStorage.setItem("segmentedImage", result.segmented_image_base64);
@@ -111,7 +136,9 @@ export default function ProcessingPage() {
     <div className="min-h-screen flex flex-col bg-background">
       {/* Header */}
       <header className="bg-primary text-primary-foreground py-4 px-6">
-        <h1 className="text-xl md:text-2xl font-bold text-center">しょりちゅう</h1>
+        <h1 className="text-xl md:text-2xl font-bold text-center">
+          {isTutorial ? "れんしゅうの じゅんび中" : "しょりちゅう"}
+        </h1>
       </header>
 
       {/* Main Content */}
