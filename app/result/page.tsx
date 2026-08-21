@@ -5,8 +5,26 @@ import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { ArrowLeft, Home, RotateCcw, Sparkles, Lightbulb } from "lucide-react"
-import Link from "next/link"
+import { Sparkles, Lightbulb, LoaderCircle } from "lucide-react"
+import {
+  markTutorialCompleted,
+  readExperimentSession,
+} from "@/lib/experiment-session"
+import {
+  beginResultMetrics,
+  clearTaskMetrics,
+  completeResultMetrics,
+  getCurrentTaskType,
+  incrementFriendMaskClick,
+  incrementStructurePartClick,
+  setCurrentTaskType,
+  type BodyPartKey,
+  type TaskType,
+} from "@/lib/task-metrics"
+import {
+  loadMajorityMaskReference,
+  loadUserMasksReference,
+} from "@/lib/result-reference-data"
 
 type BodyPart = {
   name: string
@@ -46,32 +64,276 @@ const bodyParts: BodyPart[] = [
     targetRGB: [148, 103, 189],
   },
 ]
+const bodyPartKeys: BodyPartKey[] = [
+  "head",
+  "thorax",
+  "abdomen",
+  "legs",
+]
 
 const LEG_COLOR_RGB = [148, 103, 189]
 
-// ★追加1: 型定義は、関数の「外側」（この場所）に書きます
-type ViewMode = "painted" | "structure"
+type ResultMode = "comparison" | "structure"
+
+type UserMask = {
+  id: string
+  label: string
+  image_base64: string
+}
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? ""
+const toImageSource = (value: string) => value.startsWith("data:") ? value : `data:image/png;base64,${value}`
+
+function TransparentMaskImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
+  const transparentCanvasRef = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const canvas = transparentCanvasRef.current
+    if (!canvas) return
+
+    let cancelled = false
+    const image = new Image()
+    image.onload = () => {
+      if (cancelled) return
+      const ctx = canvas.getContext("2d", { willReadFrequently: true })
+      if (!ctx) return
+
+      canvas.width = image.naturalWidth
+      canvas.height = image.naturalHeight
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(image, 0, 0)
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      const pixels = imageData.data
+      for (let index = 0; index < pixels.length; index += 4) {
+        if (pixels[index] <= 12 && pixels[index + 1] <= 12 && pixels[index + 2] <= 12) {
+          pixels[index + 3] = 0
+        }
+      }
+      ctx.putImageData(imageData, 0, 0)
+    }
+    image.src = src
+
+    return () => {
+      cancelled = true
+    }
+  }, [src])
+
+  return <canvas ref={transparentCanvasRef} role="img" aria-label={alt} className={className} />
+}
 
 export default function ResultPage() {
   const router = useRouter()
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const selfCanvasRef = useRef<HTMLCanvasElement>(null)
+  const majorityCanvasRef = useRef<HTMLCanvasElement>(null)
+  const canvasRef = majorityCanvasRef
+  const renderVersionRef = useRef(0)
+  const structurePartMapRef = useRef<Uint8Array | null>(null)
+  const structurePartMapSizeRef = useRef({ width: 0, height: 0 })
 
-  // ★追加2: 状態（State）は、関数の「内側」のここに追加します
-  const [viewMode, setViewMode] = useState<ViewMode>("structure")
-
+  const [resultMode, setResultMode] = useState<ResultMode>("comparison")
   const [selectedPart, setSelectedPart] = useState<number | null>(null)
   const [quizMode, setQuizMode] = useState(false)
   const [drawnLines, setDrawnLines] = useState<number[]>([])
   const [quizResult, setQuizResult] = useState<string | null>(null)
-  const [showHint, setShowHint] = useState(false) // ★追加: ヒント表示フラグ
+  const [showHint, setShowHint] = useState(false)
 
   const [thoraxTop, setThoraxTop] = useState<number | null>(null)
   const [thoraxBottom, setThoraxBottom] = useState<number | null>(null)
+  const [majorityMask, setMajorityMask] = useState<string | null>(null)
+  const [majorityThoraxTop, setMajorityThoraxTop] = useState<number | null>(null)
+  const [majorityThoraxBottom, setMajorityThoraxBottom] = useState<number | null>(null)
+  const [majoritySampleCount, setMajoritySampleCount] = useState(0)
+  const [isMajorityLoading, setIsMajorityLoading] = useState(true)
+  const [majorityError, setMajorityError] = useState<string | null>(null)
+  const [userMasks, setUserMasks] = useState<UserMask[]>([])
+  const [selectedUserIndex, setSelectedUserIndex] = useState(0)
+  const [isUserMasksLoading, setIsUserMasksLoading] = useState(true)
+  const [userMasksError, setUserMasksError] = useState<string | null>(null)
+  const [userMasksReloadKey, setUserMasksReloadKey] = useState(0)
+  const [taskType, setTaskType] = useState<TaskType | null>(null)
+  const [isSavingResult, setIsSavingResult] = useState(false)
 
   useEffect(() => {
-    const imageData = sessionStorage.getItem("insectImage")
-    const maskData = sessionStorage.getItem("editedMask")
+    const currentTaskType = getCurrentTaskType()
+    setTaskType(currentTaskType)
+    beginResultMetrics()
+  }, [])
 
+  const handleNextInsect = async () => {
+    if (isSavingResult) return
+    setIsSavingResult(true)
+
+    if (getCurrentTaskType() === "tutorial") {
+      markTutorialCompleted()
+      clearTaskMetrics()
+      setCurrentTaskType("experiment")
+      sessionStorage.removeItem("insectImage")
+      sessionStorage.removeItem("imageName")
+      sessionStorage.removeItem("segmentedImage")
+      sessionStorage.removeItem("editedMask")
+      sessionStorage.removeItem("thoraxTop")
+      sessionStorage.removeItem("thoraxBottom")
+      sessionStorage.setItem("currentSampleIndex", "0")
+      router.replace("/upload")
+      return
+    }
+
+    const experimentSession = readExperimentSession()
+    const taskMetrics = completeResultMetrics()
+    if (!experimentSession || !taskMetrics) {
+      alert("実験記録の情報が足りません。画面をもう一度よみこんでください。")
+      setIsSavingResult(false)
+      return
+    }
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/experiment/task/result`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            participant_id: experimentSession.participantId,
+            session_id: experimentSession.sessionId,
+            session_started_at: experimentSession.startedAt,
+            task_id: taskMetrics.taskId,
+            task_index: taskMetrics.taskIndex,
+            result_started_at: taskMetrics.resultStartedAt,
+            result_completed_at: taskMetrics.resultCompletedAt,
+            result_view_duration_ms: taskMetrics.resultViewDurationMs,
+            friend_mask_click_counts:
+              taskMetrics.friendMaskClickCounts,
+            structure_part_click_counts:
+              taskMetrics.structurePartClickCounts,
+          }),
+        },
+      )
+      const responseData = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(
+          typeof responseData.detail === "string"
+            ? responseData.detail
+            : "Result save failed",
+        )
+      }
+    } catch (error) {
+      console.error("Failed to save result metrics:", error)
+      alert("結果画面の記録を保存できませんでした。通信を確認して、もう一度押してください。")
+      setIsSavingResult(false)
+      return
+    }
+
+    const currentIndex = Number.parseInt(
+      sessionStorage.getItem("currentSampleIndex") || "0",
+      10,
+    )
+    sessionStorage.setItem(
+      "currentSampleIndex",
+      (currentIndex + 1).toString(),
+    )
+    clearTaskMetrics()
+    router.push("/upload")
+  }
+
+  useEffect(() => {
+    if (!taskType) return
+    const imageName = sessionStorage.getItem("imageName")
+    if (!imageName || !API_BASE_URL) {
+      setMajorityError("みんなのデータを よみこめませんでした。")
+      setIsMajorityLoading(false)
+      return
+    }
+
+    let cancelled = false
+
+    const loadMajorityMask = async () => {
+      try {
+        setIsMajorityLoading(true)
+        setMajorityError(null)
+        const data = await loadMajorityMaskReference({
+          apiBaseUrl: API_BASE_URL,
+          taskType,
+          imageName,
+        })
+        if (cancelled) return
+        const collectiveMask = data.collective_mask_base64 ?? data.majority_mask_base64
+        if (!collectiveMask) throw new Error("Mask is missing")
+
+        setMajorityMask(toImageSource(collectiveMask))
+        setMajorityThoraxTop(data.thorax_top ?? null)
+        setMajorityThoraxBottom(data.thorax_bottom ?? null)
+        setMajoritySampleCount(data.sample_count ?? 0)
+      } catch (error) {
+        if (cancelled) return
+        console.error("Failed to load majority mask:", error)
+        setMajorityError("みんなのデータは まだありません。")
+      } finally {
+        if (!cancelled) setIsMajorityLoading(false)
+      }
+    }
+
+    loadMajorityMask()
+    return () => {
+      cancelled = true
+    }
+  }, [taskType])
+
+  useEffect(() => {
+    if (!taskType) return
+    const imageName = sessionStorage.getItem("imageName")
+    if (!imageName || !API_BASE_URL) {
+      setUserMasksError("おともだちのいろを よみこめませんでした。")
+      setIsUserMasksLoading(false)
+      return
+    }
+
+    let cancelled = false
+
+    const loadUserMasks = async () => {
+      try {
+        setIsUserMasksLoading(true)
+        setUserMasksError(null)
+        const data = await loadUserMasksReference({
+          apiBaseUrl: API_BASE_URL,
+          taskType,
+          imageName,
+          forceRefresh: userMasksReloadKey > 0,
+        })
+        if (cancelled) return
+        const receivedMasks = Array.isArray(data.user_masks)
+          ? data.user_masks
+              .filter((mask) => mask && typeof mask.image_base64 === "string" && mask.image_base64.length > 0)
+              .map((mask, index) => ({
+                ...mask,
+                id: mask.id || `user-${index + 1}`,
+                label: mask.label || `おともだち ${index + 1}`,
+                image_base64: toImageSource(mask.image_base64),
+              }))
+          : []
+
+        setUserMasks(receivedMasks)
+        setSelectedUserIndex(0)
+      } catch (error) {
+        if (cancelled) return
+        console.error("Failed to load user masks:", error)
+        setUserMasks([])
+        setUserMasksError("おともだちのいろを よみこめませんでした。")
+      } finally {
+        if (!cancelled) setIsUserMasksLoading(false)
+      }
+    }
+
+    loadUserMasks()
+    return () => {
+      cancelled = true
+    }
+  }, [taskType, userMasksReloadKey])
+
+  useEffect(() => {
+    const renderVersion = ++renderVersionRef.current
+    const imageData = sessionStorage.getItem("insectImage")
+    const selfMaskData = sessionStorage.getItem("editedMask")
     const storedTop = sessionStorage.getItem("thoraxTop")
     const storedBottom = sessionStorage.getItem("thoraxBottom")
 
@@ -79,39 +341,70 @@ export default function ResultPage() {
     if (storedBottom) setThoraxBottom(Number(storedBottom))
 
     if (!imageData) {
-      router.push("/upload")
+      router.push(
+        getCurrentTaskType() === "tutorial" ? "/tutorial" : "/upload",
+      )
       return
     }
 
-    const canvas = canvasRef.current
-    if (!canvas) return
+    type CanvasVariant = "self" | "majority" | "quiz"
 
-    const ctx = canvas.getContext("2d", { willReadFrequently: true })
-    if (!ctx) return
+    const renderCanvas = (
+      canvas: HTMLCanvasElement | null,
+      maskData: string | null,
+      variant: CanvasVariant,
+    ) => {
+      if (variant === "majority") {
+        structurePartMapRef.current = null
+        structurePartMapSizeRef.current = { width: 0, height: 0 }
+      }
+      if (!canvas) return
+      const ctx = canvas.getContext("2d", { willReadFrequently: true })
+      if (!ctx) return
 
-    const img = new Image()
-    img.onload = () => {
-      canvas.width = img.width
-      canvas.height = img.height
+      const img = new Image()
+      img.onload = () => {
+        if (renderVersion !== renderVersionRef.current) return
+        canvas.width = img.width
+        canvas.height = img.height
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(img, 0, 0)
 
-      ctx.drawImage(img, 0, 0)
-      // --- 変更ここから ---
-      // 保存されているのは「比率(0.35など)」なので、キャンバスの高さを掛けて「座標」に戻す
-      const ratioTop = storedTop ? Number(storedTop) : 0.35
-      const ratioBottom = storedBottom ? Number(storedBottom) : 0.65
+        const useMajorityBoundaries = variant === "majority"
+        const ratioTop = useMajorityBoundaries && majorityThoraxTop !== null
+          ? majorityThoraxTop
+          : storedTop ? Number(storedTop) : 0.35
+        const ratioBottom = useMajorityBoundaries && majorityThoraxBottom !== null
+          ? majorityThoraxBottom
+          : storedBottom ? Number(storedBottom) : 0.65
+        const currentThoraxTop = ratioTop * canvas.height
+        const currentThoraxBottom = ratioBottom * canvas.height
 
-      const currentThoraxTop = ratioTop * canvas.height
-      const currentThoraxBottom = ratioBottom * canvas.height
-      // --- 変更ここまで ---
+        const drawFinishingElements = () => {
+          if (variant === "majority" && resultMode === "structure") {
+            if (selectedPart === null) {
+              drawDividingLines(
+                ctx,
+                canvas.width,
+                currentThoraxTop,
+                currentThoraxBottom,
+              )
+            }
+          } else if (variant === "quiz") {
+            drawQuizLines(ctx, canvas.width)
+          }
+        }
 
-      if (maskData) {
+        if (!maskData) {
+          drawFinishingElements()
+          return
+        }
+
         const maskImg = new Image()
         maskImg.onload = () => {
+          if (renderVersion !== renderVersionRef.current) return
 
-          // ★修正開始: クイズ中以外はモードによって塗り方を変える
-          if (!quizMode || showHint) {
-            ctx.save()
-
+          if (variant !== "quiz" || showHint) {
             const tempCanvas = document.createElement("canvas")
             tempCanvas.width = canvas.width
             tempCanvas.height = canvas.height
@@ -121,127 +414,98 @@ export default function ResultPage() {
               tempCtx.drawImage(maskImg, 0, 0, canvas.width, canvas.height)
               const imgData = tempCtx.getImageData(0, 0, canvas.width, canvas.height)
               const data = imgData.data
-              const width = canvas.width;
-
-              // 色の定義
-              const COLOR_HEAD = [31, 119, 180]    // 青
-              const COLOR_THORAX = [44, 160, 44]  // 緑
-              const COLOR_ABDOMEN = [214, 39, 40] // 赤
-              const COLOR_LEG = [148, 103, 189]   // 紫
+              const COLOR_HEAD = [31, 119, 180]
+              const COLOR_THORAX = [44, 160, 44]
+              const COLOR_ABDOMEN = [214, 39, 40]
+              const COLOR_LEG = [148, 103, 189]
+              const PART_COLORS = [
+                COLOR_HEAD,
+                COLOR_THORAX,
+                COLOR_ABDOMEN,
+                COLOR_LEG,
+              ]
+              const showStructure = variant === "majority" && resultMode === "structure"
+              const structurePartMap = showStructure
+                ? new Uint8Array(canvas.width * canvas.height)
+                : null
 
               for (let i = 0; i < data.length; i += 4) {
                 const r = data[i]
                 const g = data[i + 1]
                 const b = data[i + 2]
-                const a = data[i + 3]
+                if (data[i + 3] === 0) continue
 
-                if (a === 0) continue
-
-                const pixelIndex = i / 4;
-                const y = Math.floor(pixelIndex / width);
-
-                // 足判定: 現在の色が紫に近いかどうか
-                const distLeg = Math.abs(r - COLOR_LEG[0]) + Math.abs(g - COLOR_LEG[1]) + Math.abs(b - COLOR_LEG[2])
-                const isLeg = distLeg < 80;
-
-                // ▼▼▼ ロジック変更部分 ▼▼▼
-                if (viewMode === "structure" && !quizMode) {
-                  // 【体のつくりモード】
-
-                  // 1. まず色を決める（強制的に正しい色にするロジックは維持）
-                  if (isLeg) {
-                    data[i] = COLOR_LEG[0]; data[i + 1] = COLOR_LEG[1]; data[i + 2] = COLOR_LEG[2];
-                  } else {
-                    if (y < currentThoraxTop) {
-                      data[i] = COLOR_HEAD[0]; data[i + 1] = COLOR_HEAD[1]; data[i + 2] = COLOR_HEAD[2];
-                    } else if (y < currentThoraxBottom) {
-                      data[i] = COLOR_THORAX[0]; data[i + 1] = COLOR_THORAX[1]; data[i + 2] = COLOR_THORAX[2];
-                    } else {
-                      data[i] = COLOR_ABDOMEN[0]; data[i + 1] = COLOR_ABDOMEN[1]; data[i + 2] = COLOR_ABDOMEN[2];
-                    }
+                const colorDistances = PART_COLORS.map(
+                  ([targetR, targetG, targetB]) =>
+                    Math.abs(r - targetR)
+                    + Math.abs(g - targetG)
+                    + Math.abs(b - targetB),
+                )
+                let partIndex = 0
+                for (let index = 1; index < colorDistances.length; index += 1) {
+                  if (colorDistances[index] < colorDistances[partIndex]) {
+                    partIndex = index
                   }
-
-                  // 2. 次に濃さ（ハイライト）を決める ★ここを追加・修正
-                  let alpha = isLeg ? 200 : 180; // 通常時の濃さ
-
-                  if (selectedPart !== null) {
-                    // 部位が選択されている場合、その部位かどうか判定
-                    let isTarget = false;
-
-                    if (selectedPart === 0) { // あたま
-                      if (y < currentThoraxTop && !isLeg) isTarget = true;
-                    } else if (selectedPart === 1) { // むね
-                      if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) isTarget = true;
-                    } else if (selectedPart === 2) { // はら
-                      if (y >= currentThoraxBottom && !isLeg) isTarget = true;
-                    } else if (selectedPart === 3) { // あし
-                      if (isLeg) isTarget = true;
-                    }
-
-                    // ターゲットなら濃く(220)、それ以外はかなり薄く(40)する
-                    alpha = isTarget ? 220 : 40;
-                  }
-
-                  data[i + 3] = alpha;
-
-                } else {
-                  // 【ぬったいろモード】 または 【クイズ中】
-                  // ユーザーが塗った色をそのまま表示する
-                  let alpha = 150;
-
-                  // ハイライト処理 (選択した部位だけ濃くする既存ロジック)
-                  // ★修正: 「&& viewMode !== "painted"」を追加してください
-                  // これにより、ぬったいろモードではハイライトが無効になります
-                  if (selectedPart !== null && viewMode !== "painted") {
-                    let shouldHighlight = false;
-                    if (selectedPart === 0) {
-                      if (y < currentThoraxTop && !isLeg) shouldHighlight = true;
-                    }
-                    else if (selectedPart === 1) {
-                      if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) shouldHighlight = true;
-                    }
-                    else if (selectedPart === 2) {
-                      if (y >= currentThoraxBottom && !isLeg) shouldHighlight = true;
-                    }
-                    else if (selectedPart === 3) {
-                      if (isLeg) shouldHighlight = true;
-                    }
-                    alpha = shouldHighlight ? 220 : 40;
-                  }
-
-                  if (quizMode && showHint) alpha = 80; // ヒント時は薄く
-
-                  data[i + 3] = alpha;
                 }
-                // ▲▲▲ ロジック変更終了 ▲▲▲
+                const isLeg = partIndex === 3
+
+                if (showStructure) {
+                  if (structurePartMap) {
+                    structurePartMap[i / 4] = partIndex + 1
+                  }
+
+                  let alpha = isLeg ? 200 : 180
+                  if (selectedPart !== null) {
+                    const isTarget = selectedPart === partIndex
+                    alpha = isTarget ? 220 : 40
+                  }
+                  data[i + 3] = alpha
+                } else {
+                  data[i + 3] = variant === "quiz" && showHint ? 80 : 150
+                }
               }
 
-              tempCtx.putImageData(imgData, 0, 0);
-              ctx.drawImage(tempCanvas, 0, 0);
+              if (showStructure && structurePartMap) {
+                structurePartMapRef.current = structurePartMap
+                structurePartMapSizeRef.current = {
+                  width: canvas.width,
+                  height: canvas.height,
+                }
+              }
+
+              tempCtx.putImageData(imgData, 0, 0)
+              ctx.drawImage(tempCanvas, 0, 0)
             }
-            ctx.restore()
           }
 
-          // 線を引くのは「structure」モードの時だけ
-          if (!quizMode && viewMode === "structure") {
-            drawDividingLines(ctx, canvas.width, canvas.height, currentThoraxTop, currentThoraxBottom)
-          } else if (quizMode) {
-            drawQuizLines(ctx, canvas.width)
-          }
+          drawFinishingElements()
         }
         maskImg.src = maskData
-      } else {
-        if (quizMode) {
-          drawQuizLines(ctx, canvas.width)
-        } else {
-          drawDividingLines(ctx, canvas.width, canvas.height, currentThoraxTop, currentThoraxBottom)
-        }
       }
+      img.src = imageData
     }
-    img.src = imageData
-  }, [router, quizMode, drawnLines, selectedPart, showHint, viewMode]) // showHint依存を追加
 
+    if (quizMode) {
+      renderCanvas(majorityCanvasRef.current, selfMaskData, "quiz")
+    } else {
+      renderCanvas(selfCanvasRef.current, selfMaskData, "self")
+      renderCanvas(majorityCanvasRef.current, majorityMask, "majority")
+    }
 
+    return () => {
+      renderVersionRef.current += 1
+    }
+  }, [
+    majorityMask,
+    majorityThoraxBottom,
+    majorityThoraxTop,
+    router,
+    quizMode,
+    drawnLines,
+    selectedPart,
+    showHint,
+    resultMode,
+  ])
 
   const drawQuizLines = (ctx: CanvasRenderingContext2D, width: number) => {
     drawnLines.forEach((y) => {
@@ -257,9 +521,16 @@ export default function ResultPage() {
     })
   }
 
-  const drawDividingLines = (ctx: CanvasRenderingContext2D, width: number, height: number, tTop: number, tBottom: number) => {
+  const drawDividingLines = (
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    tTop: number,
+    tBottom: number,
+  ) => {
     const headEnd = tTop
     const thoraxEnd = tBottom
+    const lineStart = 15
+    const lineEnd = width - 15
 
     const lineColor = "#fbbf24"
     const lineShadow = "rgba(0,0,0,0.2)"
@@ -275,94 +546,97 @@ export default function ResultPage() {
     ctx.lineCap = "round"
 
     ctx.beginPath()
-    ctx.moveTo(10, headEnd)
-    ctx.lineTo(width - 10, headEnd)
+    ctx.moveTo(lineStart, headEnd)
+    ctx.lineTo(lineEnd, headEnd)
     ctx.stroke()
 
     ctx.beginPath()
-    ctx.moveTo(10, thoraxEnd)
-    ctx.lineTo(width - 10, thoraxEnd)
+    ctx.moveTo(lineStart, thoraxEnd)
+    ctx.lineTo(lineEnd, thoraxEnd)
     ctx.stroke()
 
     ctx.setLineDash([])
     ctx.fillStyle = lineColor
     const dotSize = 6
       ;[headEnd, thoraxEnd].forEach(y => {
-        ctx.beginPath(); ctx.arc(15, y, dotSize, 0, Math.PI * 2); ctx.fill()
-        ctx.beginPath(); ctx.arc(width - 15, y, dotSize, 0, Math.PI * 2); ctx.fill()
+        ctx.beginPath(); ctx.arc(lineStart, y, dotSize, 0, Math.PI * 2); ctx.fill()
+        ctx.beginPath(); ctx.arc(lineEnd, y, dotSize, 0, Math.PI * 2); ctx.fill()
       })
     ctx.restore()
 
-    drawRangeLabel(ctx, "あたま", bodyParts[0].color, 0, headEnd, width)
-    drawRangeLabel(ctx, "むね", bodyParts[1].color, headEnd, thoraxEnd, width)
-    drawRangeLabel(ctx, "はら", bodyParts[2].color, thoraxEnd, height, width)
+    drawPartTextLabel(ctx, "あたま", bodyParts[0].color, headEnd / 2, width)
+    drawPartTextLabel(ctx, "むね", bodyParts[1].color, (headEnd + thoraxEnd) / 2, width)
+    drawPartTextLabel(ctx, "おなか", bodyParts[2].color, (thoraxEnd + ctx.canvas.height) / 2, width)
   }
 
-  const drawRangeLabel = (ctx: CanvasRenderingContext2D, text: string, color: string, startY: number, endY: number, width: number) => {
-    const centerY = (startY + endY) / 2
-    const barX = width - 10
-
-    if (endY - startY < 20) return
-
+  const drawPartTextLabel = (
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    color: string,
+    centerY: number,
+    width: number,
+  ) => {
     ctx.save()
-    ctx.strokeStyle = color
-    ctx.lineWidth = 6
-    ctx.lineCap = "round"
-    ctx.beginPath()
-    ctx.moveTo(barX, startY + 5)
-    ctx.lineTo(barX, endY - 5)
-    ctx.stroke()
-
-    ctx.beginPath()
-    ctx.moveTo(barX - 5, startY + 5); ctx.lineTo(barX, startY + 5)
-    ctx.moveTo(barX - 5, endY - 5); ctx.lineTo(barX, endY - 5)
-    ctx.stroke()
-
     ctx.font = "bold 20px 'M PLUS Rounded 1c', sans-serif"
-
-    const metrics = ctx.measureText(text)
-    const paddingX = 16
-    const bgWidth = metrics.width + paddingX * 2
-    const bgHeight = 36
-
-    const bgX = barX - 15 - bgWidth
-    const bgY = centerY - bgHeight / 2
-
-    let safeBgY = bgY
-    if (safeBgY < startY) safeBgY = startY
-    if (safeBgY + bgHeight > endY) safeBgY = endY - bgHeight
-    if (safeBgY < 0) safeBgY = 0
-
-    ctx.shadowColor = "rgba(0,0,0,0.2)"
-    ctx.shadowBlur = 4
-    ctx.fillStyle = "white"
-
-    roundRect(ctx, bgX, safeBgY, bgWidth, bgHeight, bgHeight / 2)
-    ctx.fill()
-
-    ctx.lineWidth = 2
-    ctx.strokeStyle = color
-    ctx.stroke()
-
-    ctx.shadowBlur = 0
-    ctx.fillStyle = color
     ctx.textAlign = "center"
     ctx.textBaseline = "middle"
-    ctx.fillText(text, bgX + bgWidth / 2, safeBgY + bgHeight / 2 + 1)
 
+    const paddingX = 14
+    const labelHeight = 36
+    const labelWidth = ctx.measureText(text).width + paddingX * 2
+    const labelX = width - labelWidth - 24
+    const labelY = Math.max(
+      4,
+      Math.min(
+        ctx.canvas.height - labelHeight - 4,
+        centerY - labelHeight / 2,
+      ),
+    )
+
+    ctx.shadowColor = "rgba(0,0,0,0.18)"
+    ctx.shadowBlur = 4
+    ctx.shadowOffsetY = 2
+    ctx.fillStyle = "rgba(255,255,255,0.95)"
+    ctx.strokeStyle = color
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.roundRect(
+      labelX,
+      labelY,
+      labelWidth,
+      labelHeight,
+      labelHeight / 2,
+    )
+    ctx.fill()
+    ctx.stroke()
+
+    ctx.shadowColor = "transparent"
+    ctx.fillStyle = color
+    ctx.fillText(
+      text,
+      labelX + labelWidth / 2,
+      labelY + labelHeight / 2 + 1,
+    )
     ctx.restore()
   }
 
-  const roundRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
-    if (w < 2 * r) r = w / 2
-    if (h < 2 * r) r = h / 2
-    ctx.beginPath()
-    ctx.moveTo(x + r, y)
-    ctx.arcTo(x + w, y, x + w, y + h, r)
-    ctx.arcTo(x + w, y + h, x, y + h, r)
-    ctx.arcTo(x, y + h, x, y, r)
-    ctx.arcTo(x, y, x + w, y, r)
-    ctx.closePath()
+  const selectStructurePart = (
+    index: number,
+    toggleWhenSelected = false,
+  ) => {
+    const bodyPartKey = bodyPartKeys[index]
+    if (!bodyPartKey) return
+    incrementStructurePartClick(bodyPartKey)
+    setSelectedPart((current) =>
+      toggleWhenSelected && current === index ? null : index,
+    )
+  }
+
+  const handleUserMaskSelect = (index: number) => {
+    const userMask = userMasks[index]
+    if (!userMask) return
+    setSelectedUserIndex(index)
+    incrementFriendMaskClick(userMask.id)
   }
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -373,48 +647,37 @@ export default function ResultPage() {
     const scaleY = canvas.height / rect.height
     const scaleX = canvas.width / rect.width
 
-    // キャンバス上のクリック座標を取得
     const x = (e.clientX - rect.left) * scaleX
     const y = (e.clientY - rect.top) * scaleY
 
-    // 🎯 【クイズモードの時】は今まで通り線を引く処理
     if (quizMode) {
       if (drawnLines.length >= 2) return
       setDrawnLines([...drawnLines, y])
       return
     }
 
-    // 🎯 【からだのつくりモードの時】はクリックした部位を選択する処理
-    if (viewMode === "structure") {
-      const ctx = canvas.getContext("2d")
-      if (!ctx) return
+    if (resultMode === "structure") {
+      const partMap = structurePartMapRef.current
+      const mapSize = structurePartMapSizeRef.current
+      const pixelX = Math.floor(x)
+      const pixelY = Math.floor(y)
 
-      // クリックした1ピクセルの色データを取得
-      const pixel = ctx.getImageData(x, y, 1, 1).data
-      // 透明な部分（背景）をクリックした場合は選択を解除
-      if (pixel[3] === 0) {
+      if (
+        !partMap
+        || mapSize.width !== canvas.width
+        || mapSize.height !== canvas.height
+        || pixelX < 0
+        || pixelY < 0
+        || pixelX >= mapSize.width
+        || pixelY >= mapSize.height
+      ) {
         setSelectedPart(null)
         return
       }
 
-      // 色から部位を判定する関数
-      const isColorMatch = (color: [number, number, number], targetRGB: [number, number, number]) => {
-        // ピクセルの色と目標の色の差（距離）を計算して、近い色か判定
-        const dist = Math.abs(color[0] - targetRGB[0]) + Math.abs(color[1] - targetRGB[1]) + Math.abs(color[2] - targetRGB[2])
-        return dist < 80 // 許容範囲
-      }
-
-      const clickedColor: [number, number, number] = [pixel[0], pixel[1], pixel[2]]
-
-      // どの部位の色に近いかチェックして選択
-      if (isColorMatch(clickedColor, bodyParts[3].targetRGB)) {
-        setSelectedPart(3) // あし
-      } else if (isColorMatch(clickedColor, bodyParts[0].targetRGB)) {
-        setSelectedPart(0) // あたま
-      } else if (isColorMatch(clickedColor, bodyParts[1].targetRGB)) {
-        setSelectedPart(1) // むね
-      } else if (isColorMatch(clickedColor, bodyParts[2].targetRGB)) {
-        setSelectedPart(2) // はら
+      const partCode = partMap[pixelY * mapSize.width + pixelX]
+      if (partCode >= 1 && partCode <= bodyParts.length) {
+        selectStructurePart(partCode - 1)
       } else {
         setSelectedPart(null)
       }
@@ -434,11 +697,9 @@ export default function ResultPage() {
     const userLine1 = sortedLines[0]
     const userLine2 = sortedLines[1]
 
-    // ★修正: 正解判定ロジック
     const correctTop = thoraxTop ?? canvas.height * 0.35
     const correctBottom = thoraxBottom ?? canvas.height * 0.65
 
-    // 許容誤差 (画像の高さの5%くらい)
     const tolerance = canvas.height * 0.05
 
     const line1Correct = Math.abs(userLine1 - correctTop) < tolerance
@@ -454,10 +715,11 @@ export default function ResultPage() {
   }
 
   const startQuiz = () => {
+    setResultMode("comparison")
     setQuizMode(true)
     setDrawnLines([])
     setQuizResult(null)
-    setShowHint(false) // ヒントをリセット
+    setShowHint(false)
   }
 
   const endQuiz = () => {
@@ -470,11 +732,7 @@ export default function ResultPage() {
   const resetQuiz = () => {
     setDrawnLines([])
     setQuizResult(null)
-    setShowHint(false) // リセット時はヒントも消す
-
-    // 描画更新
-    // (useEffectの依存配列に依存しているので、state更新だけで再描画が走るはずだが、
-    // 即時反映のためにここで描画ロジックを呼んでも良い。今回はstate更新に任せる)
+    setShowHint(false)
   }
 
   const handleRestart = () => {
@@ -482,61 +740,113 @@ export default function ResultPage() {
     router.push("/")
   }
 
+  const selectedUserMask = userMasks[selectedUserIndex] ?? null
+
   return (
     <div className="h-screen flex flex-col bg-gradient-to-b from-green-50 to-blue-50 overflow-hidden">
       <header className="bg-gradient-to-r from-green-500 to-blue-500 text-white py-3 px-4 flex items-center gap-3 shadow-lg flex-shrink-0">
-        <Link href="/editor">
-          <Button variant="ghost" size="icon" className="text-white hover:bg-white/20 rounded-full h-9 w-9">
-            <ArrowLeft className="w-4 h-4" />
-          </Button>
-        </Link>
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4" />
-          <h1 className="text-base md:text-lg font-bold">{quizMode ? "クイズにちょうせん！" : "からだのつくり"}</h1>
+          <h1 className="text-base md:text-lg font-bold">
+            {taskType === "tutorial" ? "れんしゅう：" : ""}
+            {quizMode ? "クイズにちょうせん！" : resultMode === "structure" ? "からだのつくり" : "いろをくらべよう"}
+          </h1>
         </div>
       </header>
 
       <main className="flex-1 min-h-0 p-2 md:p-3 overflow-hidden">
-        <div className="max-w-7xl mx-auto h-full flex flex-col lg:flex-row gap-2 md:gap-3">
+        <div className="max-w-7xl mx-auto h-full flex flex-col md:flex-row gap-2 md:gap-3">
           <Card className="p-2 md:p-3 bg-white shadow-lg flex-1 min-h-0 flex flex-col items-center justify-center overflow-hidden relative">
 
-            {/* ★修正: ポジションを absolute から変更し、mb-2 で下に隙間を作る */}
-            {/* これにより、画像の上にボタンが被らず、画像の上のスペースに配置されます */}
             {!quizMode && (
               <div className="w-full flex justify-center mb-2 z-10">
-                <div className="bg-white/90 backdrop-blur-sm p-1 rounded-full shadow-md border border-gray-200 flex gap-1 pointer-events-auto">
+                <div
+                  className="bg-white/95 backdrop-blur-sm p-1 rounded-2xl shadow-md border border-gray-200 flex gap-1 pointer-events-auto"
+                  role="tablist"
+                  aria-label="けっかの見かた"
+                >
                   <button
-                    onClick={() => setViewMode("painted")}
-                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${viewMode === "painted"
-                        ? "bg-blue-500 text-white shadow-sm"
-                        : "text-gray-500 hover:bg-gray-100"
+                    type="button"
+                    role="tab"
+                    aria-selected={resultMode === "comparison"}
+                    onClick={() => { setResultMode("comparison"); setSelectedPart(null) }}
+                    className={`px-4 md:px-6 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center gap-1.5 ${resultMode === "comparison"
+                        ? "bg-orange-500 text-white shadow-sm"
+                        : "text-gray-600 hover:bg-orange-50"
                       }`}
                   >
-                    <span>🎨</span> ぬったいろ
+                    <span aria-hidden="true">🎨</span>
+                    いろをくらべよう
                   </button>
                   <button
-                    onClick={() => setViewMode("structure")}
-                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${viewMode === "structure"
+                    type="button"
+                    role="tab"
+                    aria-selected={resultMode === "structure"}
+                    onClick={() => { setResultMode("structure"); setSelectedPart(null) }}
+                    disabled={isMajorityLoading || !majorityMask}
+                    title={majorityError ?? undefined}
+                    className={`px-4 md:px-6 py-2 rounded-xl text-xs md:text-sm font-bold transition-all flex items-center gap-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${resultMode === "structure"
                         ? "bg-green-500 text-white shadow-sm"
-                        : "text-gray-500 hover:bg-gray-100"
+                        : "text-gray-600 hover:bg-green-50"
                       }`}
                   >
-                    <span>📏</span> からだのつくり
+                    <span aria-hidden="true">📏</span>
+                    からだのつくり
                   </button>
                 </div>
               </div>
             )}
 
-            {/* キャンバス (flex-1 で残りの高さを埋めるようにする) */}
-            <div className="relative w-full flex-1 flex items-center justify-center min-h-0">
-              <canvas
-                ref={canvasRef}
-                className={`max-w-full max-h-full object-contain ${quizMode ? "cursor-crosshair" : ""}`}
-                onClick={handleCanvasClick}
-              />
-            </div>
+            {quizMode ? (
+              <div className="relative w-full flex-1 flex items-center justify-center min-h-0">
+                <canvas
+                  ref={majorityCanvasRef}
+                  className="max-w-full max-h-full object-contain cursor-crosshair"
+                  onClick={handleCanvasClick}
+                />
+              </div>
+            ) : (
+              <div className="grid w-full flex-1 min-h-0 grid-cols-2 gap-2 md:gap-3">
+                <section className="min-w-0 min-h-0 rounded-2xl border-2 border-orange-200 bg-orange-50/40 p-1.5 md:p-2 flex flex-col overflow-hidden">
+                  <div className="mb-1.5 flex min-h-8 items-center justify-center rounded-xl bg-orange-100 px-2 py-1 text-center text-[11px] font-bold text-orange-900 md:text-sm">
+                    <span aria-hidden="true" className="mr-1">👤</span>
+                    じぶんのぬったいろ
+                  </div>
+                  <div className="relative flex flex-1 min-h-0 items-center justify-center overflow-hidden rounded-xl bg-white">
+                    <canvas ref={selfCanvasRef} className="max-h-full max-w-full object-contain" />
+                  </div>
+                </section>
 
-            {/* クイズ用のメッセージ (ここは変更なし) */}
+                <section className="min-w-0 min-h-0 rounded-2xl border-2 border-violet-200 bg-violet-50/40 p-1.5 md:p-2 flex flex-col overflow-hidden">
+                  <div className="mb-1.5 flex min-h-8 items-center justify-center rounded-xl bg-violet-100 px-2 py-1 text-center text-[11px] font-bold text-violet-900 md:text-sm">
+                    <span aria-hidden="true" className="mr-1">👥</span>
+                    みんなのぬったいろ
+                    {majoritySampleCount > 0 && <span className="ml-1">({majoritySampleCount}人)</span>}
+                  </div>
+                  <div className="relative flex flex-1 min-h-0 items-center justify-center overflow-hidden rounded-xl bg-white">
+                    <canvas
+                      ref={majorityCanvasRef}
+                      className={`max-h-full max-w-full object-contain ${resultMode === "structure" ? "cursor-pointer" : ""}`}
+                      onClick={handleCanvasClick}
+                    />
+                    {isMajorityLoading && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-white/75">
+                        <div className="flex items-center gap-2 rounded-full bg-white px-3 py-2 text-xs font-bold text-violet-700 shadow">
+                          <LoaderCircle className="h-4 w-4 animate-spin" />
+                          よみこみ中...
+                        </div>
+                      </div>
+                    )}
+                    {!isMajorityLoading && majorityError && (
+                      <div className="absolute inset-x-3 bottom-3 rounded-xl border border-amber-300 bg-amber-50/95 p-2 text-center text-xs font-bold text-amber-800 shadow-sm">
+                        {majorityError}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            )}
+
             {quizMode && drawnLines.length < 2 && (
               <div className="mt-2 p-2 bg-blue-100 rounded-lg text-center flex-shrink-0">
                 <p className="text-xs md:text-sm font-bold text-blue-800">
@@ -546,7 +856,7 @@ export default function ResultPage() {
             )}
           </Card>
 
-          <div className="w-full lg:w-80 xl:w-96 flex flex-col gap-2 md:gap-3 min-h-0 overflow-hidden">
+          <div className="w-full md:w-72 lg:w-80 xl:w-96 flex flex-col gap-2 md:gap-3 min-h-0 overflow-hidden">
             {quizMode ? (
               <>
                 <Card className="p-2 md:p-3 bg-blue-50 border-2 border-blue-300 flex-shrink-0">
@@ -581,7 +891,6 @@ export default function ResultPage() {
                           おわる
                         </Button>
                       </div>
-                      {/* ★追加: 正解でない場合にヒントボタンを表示 */}
                       {!quizResult.includes("せいかい") && (
                         <Button
                           size="sm"
@@ -622,10 +931,8 @@ export default function ResultPage() {
               </>
             ) : (
               <>
-{/* 1. モードによる表示の切り替え */}
-                {viewMode === "structure" ? (
+                {resultMode === "structure" ? (
                   <>
-                    {/* ★上に移動：まとめ解説 */}
                     <Card className="p-3 md:p-4 bg-gradient-to-r from-blue-50 to-green-50 border-2 border-blue-300 flex-shrink-0 shadow-sm mb-2 md:mb-3">
                       <strong className="text-base md:text-lg text-gray-900 block mb-2">💡 こんちゅうのからだ：</strong>
                       <div className="text-sm md:text-base leading-relaxed text-gray-800 space-y-2 md:space-y-3">
@@ -633,41 +940,47 @@ export default function ResultPage() {
                           こんちゅうのからだは、
                           <span
                             className="inline-block font-bold text-blue-600 cursor-pointer hover:underline hover:bg-blue-100 px-1 rounded transition-colors"
-                            onClick={() => setSelectedPart(0)}
+                            onClick={() => selectStructurePart(0)}
                           >あたま</span>・
                           <span
                             className="inline-block font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
-                            onClick={() => setSelectedPart(1)}
+                            onClick={() => selectStructurePart(1)}
                           >むね</span>・
                           <span
                             className="inline-block font-bold text-red-600 cursor-pointer hover:underline hover:bg-red-100 px-1 rounded transition-colors"
-                            onClick={() => setSelectedPart(2)}
+                            onClick={() => selectStructurePart(2)}
                           >おなか</span>（はら）
                           の3つのぶぶんにわかれています。
                         </p>
                         <p>
                           <span
                             className="inline-block font-bold text-purple-600 cursor-pointer hover:underline hover:bg-purple-100 px-1 rounded transition-colors"
-                            onClick={() => setSelectedPart(3)}
+                            onClick={() => selectStructurePart(3)}
                           >あし</span>
                           は6ほんあって、すべて
                           <span
                             className="inline-block font-bold text-green-600 cursor-pointer hover:underline hover:bg-green-100 px-1 rounded transition-colors"
-                            onClick={() => setSelectedPart(1)}
+                            onClick={() => selectStructurePart(1)}
                           >むね</span>
                           からはえています。
+                        </p>
+                        <p className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs md:text-sm">
+                          黄色の点線は、上が
+                          <strong className="text-amber-700">あたまの下はし</strong>
+                          、下が
+                          <strong className="text-amber-700">むねと、はらの境目</strong>
+                          のめやすだよ。色のついた形もよく見てみよう。
                         </p>
                       </div>
                     </Card>
 
-                    {/* ★下に移動：「からだのつくり」モードの解説リスト */}
                     <div className="space-y-2 overflow-y-auto flex-1 min-h-0 pb-1">
                       {bodyParts.map((part, index) => (
                         <Card
                           key={index}
                           className={`p-2 cursor-pointer transition-all flex-shrink-0 ${selectedPart === index ? "ring-2 ring-yellow-400 shadow-lg" : "hover:shadow-md"
                             }`}
-                          onClick={() => setSelectedPart(selectedPart === index ? null : index)}
+                          onClick={() => selectStructurePart(index, true)}
                         >
                           <div className="flex items-start gap-2">
                             <div
@@ -688,47 +1001,95 @@ export default function ResultPage() {
                         </Card>
                       ))}
                     </div>
-                    
                   </>
                 ) : (
-                  /* 「ぬったいろ」モード: 解説を隠してメッセージを表示 */
-                  <div className="flex-1 flex flex-col items-center justify-center text-center p-4 opacity-60">
-                    <Sparkles className="w-12 h-12 text-yellow-400 mb-2" />
-                    <p className="font-bold text-gray-600">じょうずにぬれたね！</p>
-                    <p className="text-sm text-gray-500">きみがぬったいろをじっくりみてみよう</p>
-                  </div>
+                  <Card className="p-3 md:p-4 bg-gradient-to-br from-amber-50 via-white to-violet-50 border-2 border-amber-300 flex-1 min-h-0 overflow-y-auto shadow-sm">
+                    <h2 className="text-base font-bold text-gray-900 md:text-lg">みんながぬったいろをかんさつ</h2>
+
+                    {isUserMasksLoading ? (
+                      <div className="mt-3 flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50/70 p-5 text-xs font-bold text-blue-800">
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                        おともだちのいろを よみこみ中...
+                      </div>
+                    ) : selectedUserMask ? (
+                      <div className="mt-3 rounded-2xl border-2 border-blue-200 bg-blue-50/70 p-2.5">
+                        <p className="mb-2 text-center text-xs font-bold text-blue-900 md:text-sm">
+                          <span aria-hidden="true">👤</span> {selectedUserMask.label} のいろ
+                        </p>
+                        <div className="flex h-40 items-center justify-center overflow-hidden rounded-xl bg-white md:h-44">
+                          <TransparentMaskImage
+                            src={selectedUserMask.image_base64}
+                            alt={`${selectedUserMask.label}のぬったいろ`}
+                            className="max-h-full max-w-full object-contain"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-3 rounded-xl border border-dashed border-gray-300 bg-white/70 p-4 text-center text-xs font-bold text-gray-500">
+                        <p>{userMasksError ?? "おともだちのいろは まだありません。"}</p>
+                        {userMasksError && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="mt-3 bg-white font-bold"
+                            onClick={() => setUserMasksReloadKey((key) => key + 1)}
+                          >
+                            もういちど
+                          </Button>
+                        )}
+                      </div>
+                    )}
+
+                    {userMasks.length > 0 && (
+                      <div className="mt-3">
+                        <p className="mb-2 text-xs font-bold text-gray-700">ほかのおともだちのいろ</p>
+                        <div className="grid max-h-40 grid-cols-3 gap-2 overflow-y-auto rounded-xl bg-white/70 p-2 pr-1">
+                          {userMasks.map((userMask, index) => {
+                            const isSelected = index === selectedUserIndex
+                            return (
+                              <button
+                                type="button"
+                                key={userMask.id}
+                                onClick={() => handleUserMaskSelect(index)}
+                                aria-pressed={isSelected}
+                                title={`${userMask.label}のいろを見る`}
+                                className={`min-w-0 rounded-xl border bg-white p-1 transition-all hover:border-blue-400 hover:shadow ${isSelected
+                                    ? "border-blue-500 ring-2 ring-blue-500 ring-offset-1"
+                                    : "border-gray-200"
+                                  }`}
+                              >
+                                <div className="flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-gray-50">
+                                  <TransparentMaskImage
+                                    src={userMask.image_base64}
+                                    alt={`${userMask.label}のサムネイル`}
+                                    className="max-h-full max-w-full object-contain"
+                                  />
+                                </div>
+                                <span className="mt-1 block truncate text-[10px] font-bold text-gray-700">{userMask.label}</span>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </Card>
                 )}
 
-                {/* 2. クイズボタンを削除（コメントアウト済み） */}
-                {/* <Button
-                  size="sm"
-                  className="w-full h-10 md:h-12 text-sm md:text-base font-bold bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 shadow-xl flex-shrink-0"
-                  onClick={startQuiz}
-                >
-                  🎯 クイズにちょうせん！
-                </Button>
-                */}
-
-                {/* 3. ナビゲーションボタン（常に表示・下に寄せる） */}
-                <div className="flex gap-2 flex-shrink-0 mt-auto">
+                {/* ★修正: 新しい「つぎへすすむ」ボタン */}
+                <div className="flex justify-end mt-3 flex-shrink-0">
                   <Button
-                    size="sm"
-                    variant="outline"
-                    className="flex-1 h-9 md:h-10 text-xs md:text-sm font-bold gap-1 bg-white"
-                    onClick={handleRestart}
+                    size="lg"
+                    onClick={() => void handleNextInsect()}
+                    disabled={isSavingResult}
+                    className="bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 text-white font-bold h-12 md:h-14 px-8 shadow-lg transform transition-all hover:scale-105"
                   >
-                    <RotateCcw className="w-3 h-3 md:w-4 md:h-4" />
-                    さいしょから
+                    {isSavingResult
+                      ? "きろくを ほぞん中..."
+                      : taskType === "tutorial"
+                        ? "れんしゅうを おわる →"
+                        : "つぎへすすむ →"}
                   </Button>
-                  <Link href="/" className="flex-1">
-                    <Button
-                      size="sm"
-                      className="w-full h-9 md:h-10 text-xs md:text-sm font-bold gap-1 bg-gradient-to-r from-green-500 to-blue-500"
-                    >
-                      <Home className="w-3 h-3 md:w-4 md:h-4" />
-                      ホームへ
-                    </Button>
-                  </Link>
                 </div>
               </>
             )}
