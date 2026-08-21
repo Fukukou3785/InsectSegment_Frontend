@@ -21,6 +21,10 @@ import {
   type BodyPartKey,
   type TaskType,
 } from "@/lib/task-metrics"
+import {
+  loadMajorityMaskReference,
+  loadUserMasksReference,
+} from "@/lib/result-reference-data"
 
 type BodyPart = {
   name: string
@@ -75,19 +79,6 @@ type UserMask = {
   id: string
   label: string
   image_base64: string
-}
-
-type MajorityMaskResponse = {
-  majority_mask_base64?: string
-  collective_mask_base64?: string
-  thorax_top?: number
-  thorax_bottom?: number
-  sample_count?: number
-}
-
-type UserMasksResponse = {
-  insect_id: string
-  user_masks: UserMask[]
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? ""
@@ -254,22 +245,18 @@ export default function ResultPage() {
       return
     }
 
-    const insectId = imageName.replace(/\.[^.]+$/, "")
-    const controller = new AbortController()
+    let cancelled = false
 
     const loadMajorityMask = async () => {
       try {
         setIsMajorityLoading(true)
         setMajorityError(null)
-        const apiPrefix =
-          taskType === "tutorial" ? "/api/tutorial" : "/api"
-        const response = await fetch(
-          `${API_BASE_URL}${apiPrefix}/majority_mask?insect_id=${encodeURIComponent(insectId)}`,
-          { cache: "no-store", signal: controller.signal },
-        )
-
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const data = (await response.json()) as MajorityMaskResponse
+        const data = await loadMajorityMaskReference({
+          apiBaseUrl: API_BASE_URL,
+          taskType,
+          imageName,
+        })
+        if (cancelled) return
         const collectiveMask = data.collective_mask_base64 ?? data.majority_mask_base64
         if (!collectiveMask) throw new Error("Mask is missing")
 
@@ -278,16 +265,18 @@ export default function ResultPage() {
         setMajorityThoraxBottom(data.thorax_bottom ?? null)
         setMajoritySampleCount(data.sample_count ?? 0)
       } catch (error) {
-        if (controller.signal.aborted) return
+        if (cancelled) return
         console.error("Failed to load majority mask:", error)
         setMajorityError("みんなのデータは まだありません。")
       } finally {
-        if (!controller.signal.aborted) setIsMajorityLoading(false)
+        if (!cancelled) setIsMajorityLoading(false)
       }
     }
 
     loadMajorityMask()
-    return () => controller.abort()
+    return () => {
+      cancelled = true
+    }
   }, [taskType])
 
   useEffect(() => {
@@ -299,22 +288,19 @@ export default function ResultPage() {
       return
     }
 
-    const insectId = imageName.replace(/\.[^.]+$/, "")
-    const controller = new AbortController()
+    let cancelled = false
 
     const loadUserMasks = async () => {
       try {
         setIsUserMasksLoading(true)
         setUserMasksError(null)
-        const apiPrefix =
-          taskType === "tutorial" ? "/api/tutorial" : "/api"
-        const response = await fetch(
-          `${API_BASE_URL}${apiPrefix}/user_masks?insect_id=${encodeURIComponent(insectId)}`,
-          { cache: "no-store", signal: controller.signal },
-        )
-
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const data = (await response.json()) as UserMasksResponse
+        const data = await loadUserMasksReference({
+          apiBaseUrl: API_BASE_URL,
+          taskType,
+          imageName,
+          forceRefresh: userMasksReloadKey > 0,
+        })
+        if (cancelled) return
         const receivedMasks = Array.isArray(data.user_masks)
           ? data.user_masks
               .filter((mask) => mask && typeof mask.image_base64 === "string" && mask.image_base64.length > 0)
@@ -329,17 +315,19 @@ export default function ResultPage() {
         setUserMasks(receivedMasks)
         setSelectedUserIndex(0)
       } catch (error) {
-        if (controller.signal.aborted) return
+        if (cancelled) return
         console.error("Failed to load user masks:", error)
         setUserMasks([])
         setUserMasksError("おともだちのいろを よみこめませんでした。")
       } finally {
-        if (!controller.signal.aborted) setIsUserMasksLoading(false)
+        if (!cancelled) setIsUserMasksLoading(false)
       }
     }
 
     loadUserMasks()
-    return () => controller.abort()
+    return () => {
+      cancelled = true
+    }
   }, [taskType, userMasksReloadKey])
 
   useEffect(() => {

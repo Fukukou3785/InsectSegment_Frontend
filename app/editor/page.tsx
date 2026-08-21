@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/card"
 import { ArrowLeft, Eraser, Paintbrush, RotateCcw, Scan, Sparkles, ZoomIn, ZoomOut, Wand2 } from "lucide-react"
 import Link from "next/link"
 import { readExperimentSession } from "@/lib/experiment-session"
+import { prefetchResultReferenceData } from "@/lib/result-reference-data"
 import {
   beginEditorMetrics,
   completeEditorMetrics,
@@ -21,6 +22,7 @@ type ToolType = "brush" | "eraser" | "zoom-in" | "zoom-out" | "sam" | "box"
 type CorrectionMode = "touch" | "box" | "brush"
 type BoxPoint = { x: number; y: number }
 type BoxDraft = { start: BoxPoint; current: BoxPoint; pointerId: number }
+type CanvasCoordinates = BoxPoint & { displayX: number; displayY: number }
 
 const bodyPartColors = {
   head: "rgb(31, 119, 180)",
@@ -55,6 +57,8 @@ const brushSizeLabels: Record<BrushSizeType, string> = {
   large: "おおきい",
 }
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? ""
+
 export default function EditorPage() {
   const router = useRouter()
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -86,6 +90,17 @@ export default function EditorPage() {
 
   useEffect(() => {
     setIsTutorial(getCurrentTaskType() === "tutorial")
+  }, [])
+
+  useEffect(() => {
+    const imageName = sessionStorage.getItem("imageName")
+    if (!imageName || !API_BASE_URL) return
+
+    void prefetchResultReferenceData({
+      apiBaseUrl: API_BASE_URL,
+      taskType: getCurrentTaskType(),
+      imageName,
+    })
   }, [])
 
   const restartAfterSessionLoss = () => {
@@ -379,19 +394,27 @@ export default function EditorPage() {
     setZoom((prev) => Math.min(Math.max(prev + delta, 0.5), 3.0))
   }
 
-  const updateCursorPosition = (e: React.MouseEvent | React.TouchEvent) => {
+  const updateCursorPosition = (
+    e: React.MouseEvent<HTMLCanvasElement>
+      | React.TouchEvent<HTMLCanvasElement>
+      | React.PointerEvent<HTMLCanvasElement>,
+  ) => {
     if (!cursorRef.current) return
-    let clientX, clientY
+    let clientX: number, clientY: number
     if ("touches" in e) {
-       if (e.touches.length > 0) {
-         clientX = e.touches[0].clientX
-         clientY = e.touches[0].clientY
-       } else return 
+      if (e.touches.length === 0) return
+      clientX = e.touches[0].clientX
+      clientY = e.touches[0].clientY
     } else {
-       clientX = e.clientX
-       clientY = e.clientY
+      clientX = e.clientX
+      clientY = e.clientY
     }
-    cursorRef.current.style.transform = `translate(${clientX}px, ${clientY}px) translate(-50%, -50%)`
+
+    const point = getCanvasCoordinatesFromClient(clientX, clientY)
+    if (!point) return
+
+    cursorRef.current.style.transform =
+      `translate(${point.displayX}px, ${point.displayY}px) translate(-50%, -50%)`
   }
 
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
@@ -422,21 +445,44 @@ export default function EditorPage() {
     }
   }
 
-  const handleCanvasClick = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleSamPointerDown = async (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (correctionMode !== "touch" || tool !== "sam" || isProcessingAI) return
+    if (e.pointerType === "mouse" && e.button !== 0) return
+
+    e.preventDefault()
+    setIsCanvasInteracting(true)
+    setIsHoveringCanvas(true)
+    updateCursorPosition(e)
+
+    const shouldHideMarker = e.pointerType === "touch"
+
+    const finishProcessing = () => {
+      setIsProcessingAI(false)
+      setIsCanvasInteracting(false)
+      if (shouldHideMarker) setIsHoveringCanvas(false)
+    }
 
     const pos = getCanvasPosition(e)
-    if (!pos) return
+    if (!pos) {
+      finishProcessing()
+      return
+    }
 
     try {
         setIsProcessingAI(true)
         
         const maskCanvas = maskCanvasRef.current
-        if (!maskCanvas) return
+        if (!maskCanvas) {
+          finishProcessing()
+          return
+        }
         
         const currentMaskBase64 = maskCanvas.toDataURL("image/png")
         const sessionId = requireSessionId()
-        if (!sessionId) return
+        if (!sessionId) {
+          finishProcessing()
+          return
+        }
 
         const formData = new FormData()
         formData.append('x', Math.round(pos.x).toString())
@@ -452,6 +498,7 @@ export default function EditorPage() {
         
         if (!response.ok) {
           if (response.status === 400 || response.status === 404) {
+            finishProcessing()
             restartAfterSessionLoss()
             return
           }
@@ -478,27 +525,44 @@ export default function EditorPage() {
                  redrawCanvas()
                  saveToHistory()
                  incrementCorrectionCount(selectedPart, "touch")
-                 setIsProcessingAI(false)
+                 finishProcessing()
              }
+             img.onerror = finishProcessing
              img.src = newMaskBase64
+        } else {
+             finishProcessing()
         }
     } catch (error) {
         console.error("SAM Error", error)
-        setIsProcessingAI(false)
+        finishProcessing()
         alert("AI修正に失敗しました")
     }
   }
 
-  const getPointerCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const getCanvasCoordinatesFromClient = (
+    clientX: number,
+    clientY: number,
+  ): CanvasCoordinates | null => {
     const canvas = canvasRef.current
     if (!canvas) return null
 
     const rect = canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return null
 
-    const x = Math.min(Math.max(e.clientX - rect.left, 0), rect.width)
-    const y = Math.min(Math.max(e.clientY - rect.top, 0), rect.height)
-    return { x, y }
+    const displayX = Math.min(Math.max(clientX - rect.left, 0), rect.width)
+    const displayY = Math.min(Math.max(clientY - rect.top, 0), rect.height)
+
+    return {
+      x: displayX * (canvas.width / rect.width),
+      y: displayY * (canvas.height / rect.height),
+      displayX,
+      displayY,
+    }
+  }
+
+  const getPointerCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const point = getCanvasCoordinatesFromClient(e.clientX, e.clientY)
+    return point ? { x: point.displayX, y: point.displayY } : null
   }
 
   const applyRefinedMask = async (data: {
@@ -665,12 +729,11 @@ export default function EditorPage() {
     setIsCanvasInteracting(false)
   }
 
-  const getCanvasPosition = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current
-    if (!canvas) return null
-    const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
+  const getCanvasPosition = (
+    e: React.MouseEvent<HTMLCanvasElement>
+      | React.TouchEvent<HTMLCanvasElement>
+      | React.PointerEvent<HTMLCanvasElement>,
+  ) => {
     let clientX: number, clientY: number
     if ("touches" in e) {
       if (e.touches.length === 0) return null
@@ -680,9 +743,9 @@ export default function EditorPage() {
       clientX = e.clientX
       clientY = e.clientY
     }
-    const x = (clientX - rect.left) * scaleX
-    const y = (clientY - rect.top) * scaleY
-    return { x, y }
+
+    const point = getCanvasCoordinatesFromClient(clientX, clientY)
+    return point ? { x: point.x, y: point.y } : null
   }
 
   const drawAtPosition = (x: number, y: number) => {
@@ -857,17 +920,6 @@ export default function EditorPage() {
   return (
     <div className="h-screen flex flex-col bg-gradient-to-b from-green-50 to-blue-50 overflow-hidden">
       
-      <div 
-        ref={cursorRef}
-        className="fixed pointer-events-none z-50 transition-opacity duration-75"
-        style={{ 
-            width: 0, height: 0, 
-            opacity: (isHoveringCanvas && (tool === 'brush' || tool === 'eraser' || tool === 'sam')) ? 1 : 0,
-            left: 0, top: 0,
-            willChange: 'transform'
-        }}
-      />
-
       <header className="bg-gradient-to-r from-green-500 to-blue-500 text-white py-3 px-4 flex items-center gap-3 shadow-lg flex-shrink-0">
         <Link href={isTutorial ? "/tutorial" : "/upload"}>
           <Button variant="ghost" size="icon" className="text-white hover:bg-white/20 rounded-full h-12 w-12">
@@ -1082,8 +1134,8 @@ export default function EditorPage() {
                 ref={canvasRef}
                 className="w-full h-full touch-none rounded-lg"
                 style={{ cursor: getCursorStyle() }}
-                onMouseEnter={() => setIsHoveringCanvas(true)}
-                onMouseLeave={() => {
+                onPointerEnter={() => setIsHoveringCanvas(true)}
+                onPointerLeave={() => {
                   setIsHoveringCanvas(false)
                   if (correctionMode !== "box") {
                     setIsCanvasInteracting(false)
@@ -1093,9 +1145,13 @@ export default function EditorPage() {
 
                 onPointerDown={(e) => {
                   if (correctionMode === "box") handleBoxPointerDown(e)
+                  else if (correctionMode === "touch") void handleSamPointerDown(e)
                   else setIsCanvasInteracting(true)
                 }}
-                onPointerMove={handleBoxPointerMove}
+                onPointerMove={(e) => {
+                  if (correctionMode === "box") handleBoxPointerMove(e)
+                  else updateCursorPosition(e)
+                }}
                 onPointerUp={(e) => {
                   if (correctionMode === "box") handleBoxPointerUp(e)
                   else setIsCanvasInteracting(false)
@@ -1113,7 +1169,21 @@ export default function EditorPage() {
                 onTouchMove={draw}
                 onTouchEnd={stopDrawing}
 
-                onClick={handleCanvasClick}
+              />
+              <div
+                ref={cursorRef}
+                className="pointer-events-none absolute left-0 top-0 z-40 transition-opacity duration-75"
+                style={{
+                  width: 0,
+                  height: 0,
+                  opacity:
+                    isHoveringCanvas
+                    && (tool === "brush" || tool === "eraser" || tool === "sam")
+                      ? 1
+                      : 0,
+                  willChange: "transform",
+                }}
+                aria-hidden="true"
               />
               {correctionMode === "box" && boxOverlayStyle && (
                 <div
