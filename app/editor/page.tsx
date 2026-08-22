@@ -23,6 +23,26 @@ type CorrectionMode = "touch" | "box" | "brush"
 type BoxPoint = { x: number; y: number }
 type BoxDraft = { start: BoxPoint; current: BoxPoint; pointerId: number }
 type CanvasCoordinates = BoxPoint & { displayX: number; displayY: number }
+type SamCandidateOption = {
+  candidate_id: string
+  segmented_image_base64: string
+  thorax_top?: number
+  thorax_bottom?: number
+  recommended?: boolean
+}
+type SamRefineResponse = {
+  segmented_image_base64?: string
+  thorax_top?: number
+  thorax_bottom?: number
+  requires_candidate_selection?: boolean
+  candidate_options?: SamCandidateOption[]
+  sam_debug?: unknown
+}
+type SamCandidateSelection = {
+  candidates: SamCandidateOption[]
+  selectedIndex: number
+  selectedPart: BodyPartType
+}
 
 const bodyPartColors = {
   head: "rgb(31, 119, 180)",
@@ -68,6 +88,8 @@ export default function EditorPage() {
   const cursorRef = useRef<HTMLDivElement>(null)
   const boxDraftRef = useRef<BoxDraft | null>(null)
   const drawingActiveRef = useRef(false)
+  const samCandidatePreviewRef = useRef<HTMLImageElement | null>(null)
+  const samCandidatePreviewRequestRef = useRef(0)
 
   const [isDrawing, setIsDrawing] = useState(false)
   const [brushSize, setBrushSize] = useState<BrushSizeType>("medium")
@@ -87,6 +109,8 @@ export default function EditorPage() {
   const [isProcessingAI, setIsProcessingAI] = useState(false)
   const [isSaving, setIsSaving] = useState(false) // ★追加: 保存中フラグ
   const [isTutorial, setIsTutorial] = useState(false)
+  const [samCandidateSelection, setSamCandidateSelection] =
+    useState<SamCandidateSelection | null>(null)
 
   useEffect(() => {
     setIsTutorial(getCurrentTaskType() === "tutorial")
@@ -377,7 +401,13 @@ export default function EditorPage() {
     ctx.drawImage(targetImage, 0, 0, canvas.width, canvas.height)
     ctx.save()
     ctx.globalAlpha = 0.6
-    ctx.drawImage(maskCanvas, 0, 0)
+    ctx.drawImage(
+      samCandidatePreviewRef.current ?? maskCanvas,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    )
     ctx.restore()
   }
   
@@ -446,7 +476,12 @@ export default function EditorPage() {
   }
 
   const handleSamPointerDown = async (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (correctionMode !== "touch" || tool !== "sam" || isProcessingAI) return
+    if (
+      correctionMode !== "touch" ||
+      tool !== "sam" ||
+      isProcessingAI ||
+      samCandidateSelection
+    ) return
     if (e.pointerType === "mouse" && e.button !== 0) return
 
     e.preventDefault()
@@ -469,73 +504,67 @@ export default function EditorPage() {
     }
 
     try {
-        setIsProcessingAI(true)
-        
-        const maskCanvas = maskCanvasRef.current
-        if (!maskCanvas) {
-          finishProcessing()
+      setIsProcessingAI(true)
+
+      const maskCanvas = maskCanvasRef.current
+      if (!maskCanvas) return
+
+      const sessionId = requireSessionId()
+      if (!sessionId) return
+
+      const formData = new FormData()
+      formData.append("x", Math.round(pos.x).toString())
+      formData.append("y", Math.round(pos.y).toString())
+      formData.append("label_part", selectedPart)
+      formData.append("current_mask", maskCanvas.toDataURL("image/png"))
+      formData.append("session_id", sessionId)
+      formData.append("candidate_mode", "true")
+
+      const response = await fetch(`${API_BASE_URL}/api/refine`, {
+        method: "POST",
+        body: formData,
+      })
+
+      if (!response.ok) {
+        if (response.status === 400 || response.status === 404) {
+          restartAfterSessionLoss()
           return
         }
-        
-        const currentMaskBase64 = maskCanvas.toDataURL("image/png")
-        const sessionId = requireSessionId()
-        if (!sessionId) {
-          finishProcessing()
-          return
-        }
+        throw new Error("API Error")
+      }
 
-        const formData = new FormData()
-        formData.append('x', Math.round(pos.x).toString())
-        formData.append('y', Math.round(pos.y).toString())
-        formData.append('label_part', selectedPart)
-        formData.append('current_mask', currentMaskBase64) 
-        formData.append('session_id', sessionId)
+      const data = await response.json() as SamRefineResponse
+      const candidates = Array.isArray(data.candidate_options)
+        ? data.candidate_options.filter(
+            (candidate) =>
+              Boolean(candidate.candidate_id) &&
+              Boolean(candidate.segmented_image_base64),
+          )
+        : []
 
-       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/refine`, {
-            method: 'POST',
-            body: formData,
+      if (
+        data.requires_candidate_selection &&
+        candidates.length > 1
+      ) {
+        setSamCandidateSelection({
+          candidates,
+          selectedIndex: 0,
+          selectedPart,
         })
-        
-        if (!response.ok) {
-          if (response.status === 400 || response.status === 404) {
-            finishProcessing()
-            restartAfterSessionLoss()
-            return
-          }
-          throw new Error("API Error")
+        await previewSamCandidate(candidates[0])
+        if (data.sam_debug) {
+          console.debug("SAM candidate debug:", data.sam_debug)
         }
+        return
+      }
 
-        const data = await response.json()
-        const newMaskBase64 = data.segmented_image_base64
-        
-        if (data.thorax_top !== undefined) {
-             sessionStorage.setItem("thoraxTop", data.thorax_top.toString())
-             sessionStorage.setItem("thoraxBottom", data.thorax_bottom.toString())
-        }
-        
-        const maskCtx = maskCanvas?.getContext("2d")
-        if (maskCanvas && maskCtx && newMaskBase64) {
-             const img = new Image()
-             img.onload = () => {
-                 maskCtx.clearRect(0,0, maskCanvas.width, maskCanvas.height)
-                 maskCtx.drawImage(img, 0, 0, maskCanvas.width, maskCanvas.height)
-                 
-                 updateGuardCanvas()
-                 
-                 redrawCanvas()
-                 saveToHistory()
-                 incrementCorrectionCount(selectedPart, "touch")
-                 finishProcessing()
-             }
-             img.onerror = finishProcessing
-             img.src = newMaskBase64
-        } else {
-             finishProcessing()
-        }
+      await applyRefinedMask(data)
+      incrementCorrectionCount(selectedPart, "touch")
     } catch (error) {
-        console.error("SAM Error", error)
-        finishProcessing()
-        alert("AI修正に失敗しました")
+      console.error("SAM Error", error)
+      alert("AI修正に失敗しました")
+    } finally {
+      finishProcessing()
     }
   }
 
@@ -565,12 +594,70 @@ export default function EditorPage() {
     return point ? { x: point.displayX, y: point.displayY } : null
   }
 
-  const applyRefinedMask = async (data: {
-    segmented_image_base64?: string
-    thorax_top?: number
-    thorax_bottom?: number
-    sam_debug?: unknown
-  }) => {
+  const previewSamCandidate = async (candidate: SamCandidateOption) => {
+    const requestId = ++samCandidatePreviewRequestRef.current
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const nextImage = new Image()
+      nextImage.onload = () => resolve(nextImage)
+      nextImage.onerror = () => reject(new Error("Failed to load SAM candidate"))
+      nextImage.src = candidate.segmented_image_base64
+    })
+
+    if (requestId !== samCandidatePreviewRequestRef.current) return
+    samCandidatePreviewRef.current = image
+    redrawCanvas()
+  }
+
+  const selectSamCandidate = async (selectedIndex: number) => {
+    const selection = samCandidateSelection
+    if (!selection || !selection.candidates[selectedIndex]) return
+
+    setSamCandidateSelection({
+      ...selection,
+      selectedIndex,
+    })
+
+    try {
+      await previewSamCandidate(selection.candidates[selectedIndex])
+    } catch (error) {
+      console.error("SAM candidate preview error", error)
+      alert("ぬり方の表示に失敗しました")
+    }
+  }
+
+  const discardSamCandidateSelection = () => {
+    samCandidatePreviewRequestRef.current += 1
+    samCandidatePreviewRef.current = null
+    setSamCandidateSelection(null)
+    redrawCanvas()
+  }
+
+  const confirmSamCandidateSelection = async () => {
+    if (!samCandidateSelection || isProcessingAI) return
+
+    const selection = samCandidateSelection
+    const candidate = selection.candidates[selection.selectedIndex]
+    if (!candidate) return
+
+    setIsProcessingAI(true)
+    samCandidatePreviewRequestRef.current += 1
+    samCandidatePreviewRef.current = null
+    setSamCandidateSelection(null)
+
+    try {
+      await applyRefinedMask(candidate)
+      incrementCorrectionCount(selection.selectedPart, "touch")
+    } catch (error) {
+      console.error("SAM candidate confirmation error", error)
+      redrawCanvas()
+      alert("ぬり方の確定に失敗しました")
+    } finally {
+      setIsProcessingAI(false)
+      setIsCanvasInteracting(false)
+    }
+  }
+
+  const applyRefinedMask = async (data: SamRefineResponse) => {
     const maskCanvas = maskCanvasRef.current
     const maskCtx = maskCanvas?.getContext("2d")
     if (!maskCanvas || !maskCtx || !data.segmented_image_base64) {
@@ -596,7 +683,7 @@ export default function EditorPage() {
       image.src = data.segmented_image_base64 as string
     })
 
-    if (data.sam_debug) console.debug("SAM box debug:", data.sam_debug)
+    if (data.sam_debug) console.debug("SAM refine debug:", data.sam_debug)
   }
 
   const submitBoxRefinement = async (start: BoxPoint, end: BoxPoint) => {
@@ -887,6 +974,7 @@ export default function EditorPage() {
   }
 
   const getCursorStyle = () => {
+    if (samCandidateSelection) return "default"
     if (correctionMode === "box") return isProcessingAI ? "wait" : "crosshair"
     if (tool === "zoom-in") return "zoom-in"
     if (tool === "zoom-out") return "zoom-out"
@@ -957,6 +1045,7 @@ export default function EditorPage() {
                     onClick={() => {
                       setSelectedPart(part)
                     }}
+                    disabled={Boolean(samCandidateSelection)}
                   >
                     <div className="text-lg leading-none mb-1">{bodyPartEmojis[part]}</div>
                     <div className="text-xs whitespace-nowrap">{bodyPartLabels[part]}</div>
@@ -976,6 +1065,7 @@ export default function EditorPage() {
                   aria-selected={correctionMode === "touch"}
                   className={correctionMode === "touch" ? "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-purple-600 text-white" : "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-gray-100 text-gray-700"}
                   onClick={() => selectCorrectionMode("touch")}
+                  disabled={Boolean(samCandidateSelection)}
                 >
                   <Wand2 className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
                   <span>タッチで<br />おまかせ</span>
@@ -986,6 +1076,7 @@ export default function EditorPage() {
                   aria-selected={correctionMode === "box"}
                   className={correctionMode === "box" ? "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-teal-600 text-white" : "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-gray-100 text-gray-700"}
                   onClick={() => selectCorrectionMode("box")}
+                  disabled={Boolean(samCandidateSelection)}
                 >
                   <Scan className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
                   <span>かこんで<br />おまかせ</span>
@@ -996,14 +1087,17 @@ export default function EditorPage() {
                   aria-selected={correctionMode === "brush"}
                   className={correctionMode === "brush" ? "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-blue-600 text-white" : "h-12 min-w-0 px-1 text-[10px] whitespace-normal leading-tight bg-gray-100 text-gray-700"}
                   onClick={() => selectCorrectionMode("brush")}
+                  disabled={Boolean(samCandidateSelection)}
                 >
                   <Paintbrush className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
                   <span>じぶんで<br />なおす</span>
                 </Button>
               </div>
               <p className="mt-1.5 text-xs text-center leading-snug text-gray-600">
-                {correctionMode === "touch"
-                  ? "なおしたいところを、ポンとタッチしてね"
+                {samCandidateSelection
+                  ? "いちばん近いぬり方を、下からえらんでね"
+                  : correctionMode === "touch"
+                    ? "なおしたいところを、ポンとタッチしてね"
                   : correctionMode === "box"
                     ? "ぬりたいところを、四角でかこんでね"
                     : "ペンやけしゴムで、すこしずつなおせるよ"}
@@ -1016,48 +1110,112 @@ export default function EditorPage() {
             </Card>
 
             <Card className="p-2 bg-gradient-to-br from-purple-50 to-pink-50 shadow-sm flex-shrink-0">
-              <h3 className="text-sm font-bold mb-1.5 text-center text-gray-800">
-                {correctionMode === "touch" ? "タッチのしかた" : correctionMode === "box" ? "かこみかた" : "どうぐ"}
-              </h3>
-              {correctionMode === "touch" && (
-                <div className="mb-2 flex items-center justify-center gap-2 rounded-lg bg-purple-100 px-3 py-2 text-center text-xs font-bold text-purple-800">
-                  <Wand2 className="h-4 w-4 flex-shrink-0" />
-                  色をえらんで、なおしたいところを1回タッチ
-                </div>
-              )}
-              {correctionMode === "box" && (
-                <div className="mb-2 flex items-center justify-center gap-2 rounded-lg bg-teal-100 px-3 py-2 text-center text-xs font-bold text-teal-800">
-                  <Scan className="h-4 w-4 flex-shrink-0" />
-                  ぬりたいところを、指やマウスで四角にかこむ
-                </div>
-              )}
-              {correctionMode === "brush" && (
-                <div className="grid grid-cols-2 gap-1.5">
-                  <Button
-                    size="sm"
-                    className={`h-10 flex-col gap-0.5 text-xs font-bold transition-all hover:scale-[1.02] ${
-                      tool === "brush"
-                        ? "bg-blue-500 hover:bg-blue-600 shadow-lg scale-105 ring-2 ring-yellow-400"
-                        : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                    }`}
-                    onClick={() => setTool("brush")}
+              {samCandidateSelection ? (
+                <div>
+                  <h3 className="mb-1 text-center text-sm font-bold text-purple-900">
+                    ぬり方を えらぼう
+                  </h3>
+                  <p className="mb-2 text-center text-[11px] font-bold leading-snug text-purple-800">
+                    画像を見くらべて、いちばん近いものをえらんでね
+                  </p>
+                  <div
+                    className="mb-2 grid gap-1.5"
+                    style={{
+                      gridTemplateColumns: `repeat(${samCandidateSelection.candidates.length}, minmax(0, 1fr))`,
+                    }}
+                    role="radiogroup"
+                    aria-label="ぬり方の候補"
                   >
-                    <Paintbrush className="w-3 h-3 sm:w-4 sm:h-4" />
-                    <span className="text-[8px] sm:text-[10px]">ブラシ</span>
-                  </Button>
-                  <Button
-                    size="sm"
-                    className={`h-10 flex-col gap-0.5 text-xs font-bold transition-all hover:scale-[1.02] ${
-                      tool === "eraser"
-                        ? "bg-orange-500 hover:bg-orange-600 shadow-lg scale-105 ring-2 ring-yellow-400"
-                        : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                    }`}
-                    onClick={() => setTool("eraser")}
-                  >
-                    <Eraser className="w-3 h-3 sm:w-4 sm:h-4" />
-                    <span className="text-[8px] sm:text-[10px]">けしゴム</span>
-                  </Button>
+                    {samCandidateSelection.candidates.map((candidate, index) => (
+                      <Button
+                        key={candidate.candidate_id}
+                        type="button"
+                        size="sm"
+                        role="radio"
+                        aria-checked={samCandidateSelection.selectedIndex === index}
+                        className={`h-9 px-1 text-xs font-bold ${
+                          samCandidateSelection.selectedIndex === index
+                            ? "bg-purple-600 text-white ring-2 ring-yellow-400 hover:bg-purple-700"
+                            : "border-2 border-purple-200 bg-white text-purple-800 hover:bg-purple-100"
+                        }`}
+                        onClick={() => void selectSamCandidate(index)}
+                        disabled={isProcessingAI}
+                      >
+                        ぬり方 {index + 1}
+                      </Button>
+                    ))}
+                  </div>
+                  <p className="mb-2 text-center text-xs font-bold text-gray-700">
+                    {samCandidateSelection.selectedIndex + 1} / {samCandidateSelection.candidates.length}
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-9 border-2 border-gray-300 bg-white px-1 text-[10px] font-bold text-gray-700"
+                      onClick={discardSamCandidateSelection}
+                      disabled={isProcessingAI}
+                    >
+                      もういちどタッチ
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-9 bg-green-500 px-1 text-xs font-bold text-white hover:bg-green-600"
+                      onClick={() => void confirmSamCandidateSelection()}
+                      disabled={isProcessingAI}
+                    >
+                      これにする
+                    </Button>
+                  </div>
                 </div>
+              ) : (
+                <>
+                  <h3 className="text-sm font-bold mb-1.5 text-center text-gray-800">
+                    {correctionMode === "touch" ? "タッチのしかた" : correctionMode === "box" ? "かこみかた" : "どうぐ"}
+                  </h3>
+                  {correctionMode === "touch" && (
+                    <div className="mb-2 flex items-center justify-center gap-2 rounded-lg bg-purple-100 px-3 py-2 text-center text-xs font-bold text-purple-800">
+                      <Wand2 className="h-4 w-4 flex-shrink-0" />
+                      色をえらんで、なおしたいところを1回タッチ
+                    </div>
+                  )}
+                  {correctionMode === "box" && (
+                    <div className="mb-2 flex items-center justify-center gap-2 rounded-lg bg-teal-100 px-3 py-2 text-center text-xs font-bold text-teal-800">
+                      <Scan className="h-4 w-4 flex-shrink-0" />
+                      ぬりたいところを、指やマウスで四角にかこむ
+                    </div>
+                  )}
+                  {correctionMode === "brush" && (
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <Button
+                        size="sm"
+                        className={`h-10 flex-col gap-0.5 text-xs font-bold transition-all hover:scale-[1.02] ${
+                          tool === "brush"
+                            ? "bg-blue-500 hover:bg-blue-600 shadow-lg scale-105 ring-2 ring-yellow-400"
+                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                        }`}
+                        onClick={() => setTool("brush")}
+                      >
+                        <Paintbrush className="w-3 h-3 sm:w-4 sm:h-4" />
+                        <span className="text-[8px] sm:text-[10px]">ブラシ</span>
+                      </Button>
+                      <Button
+                        size="sm"
+                        className={`h-10 flex-col gap-0.5 text-xs font-bold transition-all hover:scale-[1.02] ${
+                          tool === "eraser"
+                            ? "bg-orange-500 hover:bg-orange-600 shadow-lg scale-105 ring-2 ring-yellow-400"
+                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                        }`}
+                        onClick={() => setTool("eraser")}
+                      >
+                        <Eraser className="w-3 h-3 sm:w-4 sm:h-4" />
+                        <span className="text-[8px] sm:text-[10px]">けしゴム</span>
+                      </Button>
+                    </div>
+                  )}
+                </>
               )}
             </Card>
 
@@ -1099,7 +1257,7 @@ export default function EditorPage() {
               variant="outline"
               className="h-8 sm:h-10 md:h-12 flex items-center justify-center gap-1 font-bold text-[9px] sm:text-xs bg-white hover:bg-gray-50 border-2 border-gray-300 flex-shrink-0"
               onClick={handleUndo}
-              disabled={history.length <= 1}
+              disabled={history.length <= 1 || Boolean(samCandidateSelection)}
             >
               <RotateCcw className="w-3 h-3 sm:w-4 sm:h-4" />
               <span className="text-[8px] sm:text-[10px]">もどす</span>
@@ -1107,15 +1265,19 @@ export default function EditorPage() {
 
             <Button
               size="sm"
-              disabled={isSaving}
+              disabled={isSaving || Boolean(samCandidateSelection)}
               className={`h-10 sm:h-12 md:h-14 text-[9px] sm:text-xs md:text-sm font-bold shadow-xl transform transition-all flex-shrink-0 ${
-                isSaving
+                isSaving || samCandidateSelection
                   ? "bg-gray-400 cursor-not-allowed"
                   : "bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 hover:scale-105"
               }`}
               onClick={handleNext}
             >
-              {isSaving ? "ほぞんちゅう..." : "できた！つぎへ →"}
+              {isSaving
+                ? "ほぞんちゅう..."
+                : samCandidateSelection
+                  ? "ぬり方をきめてね"
+                  : "できた！つぎへ →"}
             </Button>
           </div>
         </aside>
@@ -1178,6 +1340,7 @@ export default function EditorPage() {
                   height: 0,
                   opacity:
                     isHoveringCanvas
+                    && !samCandidateSelection
                     && (tool === "brush" || tool === "eraser" || tool === "sam")
                       ? 1
                       : 0,
@@ -1191,6 +1354,13 @@ export default function EditorPage() {
                   style={boxOverlayStyle}
                   aria-hidden="true"
                 />
+              )}
+              {correctionMode === "touch" && isProcessingAI && (
+                <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-white/20">
+                  <div className="rounded-full bg-white/95 px-4 py-2 text-sm font-bold text-purple-800 shadow-lg">
+                    AIがぬり方をさがしているよ...
+                  </div>
+                </div>
               )}
               {correctionMode === "box" && isProcessingAI && (
                 <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-white/25">
